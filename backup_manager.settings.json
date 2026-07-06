@@ -1,0 +1,23 @@
+{
+  "conf_path": "C:\\Users\\JOEL-PRE-VENDAS\\AppData\\Roaming\\rclone\\rclone.conf",
+  "copy": {
+    "create_empty_src_dirs": true,
+    "error_on_no_transfer": false,
+    "fast_list": true,
+    "dry_run": false,
+    "checksum": false,
+    "size_only": false,
+    "ignore_existing": true,
+    "update": true,
+    "use_json_log": false,
+    "stats": "1s",
+    "transfers": "4",
+    "checkers": "8",
+    "retries": "5",
+    "low_level_retries": "10",
+    "multi_thread_streams": "4",
+    "buffer_size": "",
+    "tpslimit": "",
+    "log_level": "NOTICE"
+  }
+}
