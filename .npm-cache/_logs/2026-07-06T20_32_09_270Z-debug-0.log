@@ -1,0 +1,50 @@
+0 verbose cli C:\Program Files\nodejs\node.exe C:\Program Files\nodejs\node_modules\npm\bin\npm-cli.js
+1 info using npm@11.6.1
+2 info using node@v24.11.0
+3 silly config load:file:C:\Program Files\nodejs\node_modules\npm\npmrc
+4 silly config load:file:E:\DEV PESSOAL\Rclone_autocopy\.npmrc
+5 silly config load:file:C:\Users\JOEL-PRE-VENDAS\.npmrc
+6 silly config load:file:C:\Users\JOEL-PRE-VENDAS\AppData\Roaming\npm\etc\npmrc
+7 verbose title npm exec skills find rclone cli ui
+8 verbose argv "exec" "--" "skills" "find" "rclone" "cli" "ui"
+9 verbose logfile logs-max:10 dir:E:\DEV PESSOAL\Rclone_autocopy\.npm-cache\_logs\2026-07-06T20_32_09_270Z-
+10 verbose logfile E:\DEV PESSOAL\Rclone_autocopy\.npm-cache\_logs\2026-07-06T20_32_09_270Z-debug-0.log
+11 silly logfile done cleaning log files
+12 silly packumentCache heap:4496293888 maxSize:1124073472 maxEntrySize:562036736
+13 http fetch GET 200 https://registry.npmjs.org/skills 122ms (cache miss)
+14 silly packumentCache heap:4496293888 maxSize:1124073472 maxEntrySize:562036736
+15 http fetch GET 200 https://registry.npmjs.org/npm 250ms
+16 silly packumentCache heap:4496293888 maxSize:1124073472 maxEntrySize:562036736
+17 warn exec The following package was not found and will be installed: skills@1.5.14
+18 silly idealTree buildDeps
+19 silly fetch manifest skills@1.5.14
+20 silly packumentCache full:https://registry.npmjs.org/skills cache-miss
+21 http fetch GET 200 https://registry.npmjs.org/skills 63ms (cache miss)
+22 silly packumentCache full:https://registry.npmjs.org/skills set size:undefined disposed:false
+23 silly placeDep ROOT skills@1.5.14 OK for:  want: 1.5.14
+24 silly fetch manifest yaml@^2.8.3
+25 silly packumentCache full:https://registry.npmjs.org/yaml cache-miss
+26 http fetch GET 200 https://registry.npmjs.org/yaml 60ms (cache miss)
+27 silly packumentCache full:https://registry.npmjs.org/yaml set size:undefined disposed:false
+28 silly placeDep ROOT yaml@2.9.0 OK for: skills@1.5.14 want: ^2.8.3
+29 silly reify moves {}
+30 silly audit bulk request { skills: [ '1.5.14' ], yaml: [ '2.9.0' ] }
+31 http cache skills@https://registry.npmjs.org/skills/-/skills-1.5.14.tgz 0ms (cache hit)
+32 http cache yaml@https://registry.npmjs.org/yaml/-/yaml-2.9.0.tgz 0ms (cache hit)
+33 silly tarball no local data for skills@https://registry.npmjs.org/skills/-/skills-1.5.14.tgz. Extracting by manifest.
+34 silly tarball no local data for yaml@https://registry.npmjs.org/yaml/-/yaml-2.9.0.tgz. Extracting by manifest.
+35 http fetch GET 200 https://registry.npmjs.org/skills/-/skills-1.5.14.tgz 80ms (cache miss)
+36 http fetch POST 200 https://registry.npmjs.org/-/npm/v1/security/advisories/bulk 232ms
+37 silly audit report {}
+38 http fetch GET 200 https://registry.npmjs.org/yaml/-/yaml-2.9.0.tgz 321ms (cache miss)
+39 verbose cwd E:\DEV PESSOAL\Rclone_autocopy
+40 verbose os Windows_NT 10.0.26200
+41 verbose node v24.11.0
+42 verbose npm  v11.6.1
+43 notice
+43 notice New minor version of npm available! 11.6.1 -> 11.18.0
+43 notice Changelog: https://github.com/npm/cli/releases/tag/v11.18.0
+43 notice To update run: npm install -g npm@11.18.0
+43 notice  { force: true, Symbol(proc-log.meta): true }
+44 verbose exit 0
+45 info ok

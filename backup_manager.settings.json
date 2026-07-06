@@ -9,7 +9,6 @@
     "size_only": false,
     "ignore_existing": true,
     "update": true,
-    "use_json_log": false,
     "stats": "1s",
     "transfers": "4",
     "checkers": "8",
@@ -18,6 +17,7 @@
     "multi_thread_streams": "4",
     "buffer_size": "",
     "tpslimit": "",
-    "log_level": "NOTICE"
+    "log_level": "ERROR",
+    "use_json_log": false
   }
 }

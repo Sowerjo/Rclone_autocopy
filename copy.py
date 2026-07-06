@@ -5,19 +5,44 @@ import re
 import subprocess
 import sys
 import tempfile
-import threading
-import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
-from tkinter.scrolledtext import ScrolledText
+
+from PySide6.QtCore import QEvent, QPoint, QRectF, QSize, Qt, QThread, Signal
+from PySide6.QtGui import QColor, QCursor, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap, QTextCursor
+from PySide6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QComboBox,
+    QFileDialog,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QPlainTextEdit,
+    QProgressBar,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QSplitter,
+    QStyle,
+    QTabWidget,
+    QTextEdit,
+    QToolButton,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
 
 PAT_BYTES = re.compile(
     r"Transferred:\s*([\d\.]+\s*(?:[KMGT]?iB|B))\s*/\s*([\d\.]+\s*(?:[KMGT]?iB|B))",
     re.IGNORECASE,
 )
 PAT_FILES = re.compile(r"Transferred:\s*(\d+)\s*/\s*(\d+)", re.IGNORECASE)
-RCLONE_FLAGS = [
-    "--progress",
-]
+RCLONE_FLAGS = ["--progress"]
+
 DEFAULT_COPY_SETTINGS = {
     "create_empty_src_dirs": True,
     "error_on_no_transfer": False,
@@ -38,6 +63,7 @@ DEFAULT_COPY_SETTINGS = {
     "tpslimit": "",
     "log_level": "NOTICE",
 }
+
 COPY_SETTING_HELP = {
     "create_empty_src_dirs": "Cria no destino as pastas vazias encontradas na origem. Isso preserva a estrutura completa do diretório mesmo quando algumas pastas ainda não têm arquivos.",
     "error_on_no_transfer": "Faz a operação retornar erro quando nenhum arquivo for transferido. É útil para detectar execuções que terminaram sem copiar nada, em vez de tratá-las como sucesso silencioso.",
@@ -58,16 +84,24 @@ COPY_SETTING_HELP = {
     "log_level": "Controla o nível de detalhe do log exibido em Atividade. DEBUG mostra muito mais informação; NOTICE é um equilíbrio para uso normal; ERROR mostra só falhas.",
     "use_json_log": "Faz o rclone emitir logs em formato JSON. É útil para análise técnica ou integração, mas fica menos legível para leitura manual no painel.",
 }
+
 LOG_LEVELS = ("DEBUG", "INFO", "NOTICE", "ERROR")
-ACCENT = "#2f6fed"
-ACCENT_DARK = "#1f4fb3"
-SURFACE = "#f3f6fb"
+
+ACCENT = "#1f6fff"
+ACCENT_DARK = "#0f56d9"
+ACCENT_LIGHT = "#dbe9ff"
+SURFACE = "#f5f8ff"
 CARD = "#ffffff"
-TEXT = "#16324f"
-MUTED = "#66758a"
+TEXT = "#17325c"
+TEXT_SOFT = "#57719b"
 SUCCESS = "#198754"
 WARNING = "#b26a00"
-ERROR = "#bb2d3b"
+ERROR = "#df3b43"
+BORDER = "#d7e3f4"
+
+ROLE_KIND = Qt.UserRole + 1
+ROLE_PATH = Qt.UserRole + 2
+ROLE_LOADED = Qt.UserRole + 3
 
 
 def parse_size(value):
@@ -85,100 +119,269 @@ def parse_size(value):
     return int(float(number) * multiplier[unit.upper()])
 
 
-class ToolTip:
-    def __init__(self, widget, text):
-        self.widget = widget
-        self.text = text
-        self.tipwindow = None
-        self.label = None
-        self.widget.bind("<Enter>", self.show, add="+")
-        self.widget.bind("<Leave>", self.hide, add="+")
+class InAppToolTip(QFrame):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("inAppTooltip")
+        self.setWindowFlags(Qt.Widget)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 10)
+        self.label = QLabel()
+        self.label.setWordWrap(True)
+        self.label.setTextFormat(Qt.PlainText)
+        self.label.setObjectName("inAppTooltipLabel")
+        layout.addWidget(self.label)
+        self.hide()
 
-    def show(self, _event=None):
-        if self.tipwindow or not self.text:
+    def show_for(self, anchor, text):
+        host = anchor.window().centralWidget() or anchor.window()
+        if self.parent() is not host:
+            self.setParent(host)
+        self.label.setText(text)
+        self.adjustSize()
+        pos = anchor.mapTo(host, QPoint(anchor.width() + 10, 0))
+        x = min(max(8, pos.x()), max(8, host.width() - self.width() - 8))
+        y = min(max(8, pos.y()), max(8, host.height() - self.height() - 8))
+        self.move(x, y)
+        self.raise_()
+        self.show()
+
+
+class InfoButton(QToolButton):
+    def __init__(self, text, parent=None):
+        super().__init__(parent)
+        self.help_text = text
+        self.setText("ⓘ")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setAutoRaise(True)
+        self.setObjectName("infoButton")
+        self.setFocusPolicy(Qt.NoFocus)
+
+    def _tooltip(self):
+        window = self.window()
+        tip = getattr(window, "_in_app_tooltip", None)
+        if tip is None:
+            tip = InAppToolTip(window.centralWidget() or window)
+            window._in_app_tooltip = tip
+        return tip
+
+    def enterEvent(self, event):
+        self._tooltip().show_for(self, self.help_text)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        tip = getattr(self.window(), "_in_app_tooltip", None)
+        if tip is not None:
+            tip.hide()
+        super().leaveEvent(event)
+
+
+class StateCheckBox(QCheckBox):
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self.setProperty("role", "stateCheck")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setIconSize(QSize(18, 18))
+        self.stateChanged.connect(self._refresh_icon)
+        self._refresh_icon()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() in (QEvent.EnabledChange, QEvent.StyleChange, QEvent.PaletteChange):
+            self._refresh_icon()
+
+    def _refresh_icon(self):
+        self.setIcon(self._build_icon(self.isChecked(), self.isEnabled()))
+
+    @staticmethod
+    def _build_icon(checked, enabled):
+        if enabled and checked:
+            fill = QColor(ACCENT)
+            border = QColor(ACCENT_DARK)
+            mark = QColor("#ffffff")
+        elif enabled:
+            fill = QColor("#ffffff")
+            border = QColor("#7d9ac7")
+            mark = None
+        else:
+            fill = QColor("#eef3fb")
+            border = QColor("#c3d2e8")
+            mark = QColor("#a8b9d3") if checked else None
+
+        pixmap = QPixmap(18, 18)
+        pixmap.fill(Qt.transparent)
+
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setPen(QPen(border, 1.35))
+        painter.setBrush(fill)
+        painter.drawRoundedRect(QRectF(2.0, 2.0, 14.0, 14.0), 4, 4)
+
+        if mark is not None:
+            painter.setPen(QPen(mark, 2.1, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.drawLine(5.2, 9.4, 7.6, 11.8)
+            painter.drawLine(7.6, 11.8, 12.9, 6.3)
+
+        painter.end()
+        return QIcon(pixmap)
+
+
+class RcloneCopyWorker(QThread):
+    started_ok = Signal()
+    line_received = Signal(str)
+    failed = Signal(str)
+    finished_result = Signal(int, bool)
+
+    def __init__(self, cmd):
+        super().__init__()
+        self.cmd = cmd
+        self.proc = None
+        self.cancelled = False
+
+    def run(self):
+        try:
+            self.proc = subprocess.Popen(
+                self.cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+            )
+        except Exception as exc:
+            self.failed.emit(str(exc))
             return
-        root = self.widget.winfo_toplevel()
-        self.tipwindow = tw = tk.Frame(
-            root,
-            bg="#16324f",
-            highlightbackground="#284d78",
-            highlightthickness=1,
-            bd=0,
-        )
-        self.label = tk.Label(
-            tw,
-            text=self.text,
-            justify="left",
-            wraplength=320,
-            bg="#16324f",
-            fg="white",
-            padx=10,
-            pady=8,
-            font=("Segoe UI", 9),
-        )
-        self.label.pack()
-        tw.place(x=0, y=0)
-        tw.update_idletasks()
 
-        root.update_idletasks()
-        root_x = root.winfo_rootx()
-        root_y = root.winfo_rooty()
-        x = self.widget.winfo_rootx() - root_x + self.widget.winfo_width() + 10
-        y = self.widget.winfo_rooty() - root_y
-        max_x = max(8, root.winfo_width() - tw.winfo_reqwidth() - 8)
-        max_y = max(8, root.winfo_height() - tw.winfo_reqheight() - 8)
-        x = min(max(8, x), max_x)
-        y = min(max(8, y), max_y)
-        tw.place(x=x, y=y)
+        self.started_ok.emit()
+        for line in iter(self.proc.stdout.readline, ""):
+            self.line_received.emit(line)
 
-    def hide(self, _event=None):
-        if self.tipwindow is not None:
-            self.tipwindow.place_forget()
-            self.tipwindow.destroy()
-            self.tipwindow = None
-            self.label = None
+        rc = self.proc.wait()
+        self.finished_result.emit(rc, self.cancelled)
+
+    def cancel(self):
+        self.cancelled = True
+        if self.proc and self.proc.poll() is None:
+            try:
+                self.proc.terminate()
+            except Exception:
+                pass
 
 
-class RcloneManagerGUI(tk.Tk):
+class RcloneListWorker(QThread):
+    loaded = Signal(object, list, str)
+
+    def __init__(self, cmd, context):
+        super().__init__()
+        self.cmd = cmd
+        self.context = context
+
+    def run(self):
+        try:
+            result = subprocess.run(
+                self.cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+            output = result.stdout or result.stderr or "[]"
+            if result.returncode != 0:
+                raise RuntimeError(output.strip())
+
+            entries = json.loads(output)
+            items = sorted(
+                [
+                    {
+                        "name": entry.get("Name", "").strip(),
+                        "kind": "dir" if entry.get("IsDir") else "file",
+                    }
+                    for entry in entries
+                    if entry.get("Name", "").strip()
+                ],
+                key=lambda entry: (entry["kind"] != "dir", entry["name"].lower()),
+            )
+            self.loaded.emit(self.context, items, "")
+        except Exception as exc:
+            self.loaded.emit(self.context, [], str(exc))
+
+
+class ResponsiveShell(QWidget):
+    def __init__(self, left_widget, right_widget, threshold=1120, left_stretch=11, right_stretch=10):
+        super().__init__()
+        self.threshold = threshold
+        self.left_stretch = left_stretch
+        self.right_stretch = right_stretch
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.splitter = QSplitter(Qt.Horizontal)
+        self.splitter.setChildrenCollapsible(False)
+        self.splitter.addWidget(left_widget)
+        self.splitter.addWidget(right_widget)
+        self.splitter.setStretchFactor(0, left_stretch)
+        self.splitter.setStretchFactor(1, right_stretch)
+        layout.addWidget(self.splitter)
+        self._apply_orientation()
+
+    def resizeEvent(self, event):
+        self._apply_orientation()
+        super().resizeEvent(event)
+
+    def _apply_orientation(self):
+        orientation = Qt.Vertical if self.width() < self.threshold else Qt.Horizontal
+        if self.splitter.orientation() != orientation:
+            self.splitter.setOrientation(orientation)
+            if orientation == Qt.Vertical:
+                self.splitter.setSizes([max(360, self.height() // 2), max(280, self.height() // 2)])
+            else:
+                self.splitter.setSizes([max(500, self.width() // 2), max(420, self.width() // 2)])
+
+
+class RcloneManagerWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.title("Backup Manager")
-        self.geometry("1180x760")
-        self.minsize(1040, 680)
-        self.configure(bg=SURFACE)
+        self.setWindowTitle("Backup Manager")
+        self.resize(1280, 900)
+        self.setMinimumSize(980, 680)
+
+        app_icon = self._load_app_icon()
+        if not app_icon.isNull():
+            self.setWindowIcon(app_icon)
+            QApplication.instance().setWindowIcon(app_icon)
 
         self.rclone_bin = self._resolve_rclone_bin()
         self.settings_path = self._resolve_settings_path()
         self.conf_path = os.path.join(
-            os.environ["USERPROFILE"], r"AppData\Roaming\rclone\rclone.conf"
+            os.environ.get("USERPROFILE", ""), r"AppData\Roaming\rclone\rclone.conf"
         )
         self.remotes = []
         self.active_operation = None
         self.action_buttons = []
         self.cancel_buttons = []
-        self.log_widgets = []
-        self.tooltips = []
+        self.list_workers = set()
+        self.copy_settings_widgets = {}
 
-        self.status_var = tk.StringVar(value="Pronto para iniciar.")
-        self.details_var = tk.StringVar(
-            value="Selecione uma origem, um destino e inicie a copia."
-        )
-        self.conf_var = tk.StringVar(value=self.conf_path)
-        self.remote_count_var = tk.StringVar(value="0 remotes carregados")
-        self.src_path = tk.StringVar()
-        self.dest_local = tk.StringVar()
-        self.lr_subdir = tk.StringVar(value="/")
-        self.rl_subdir = tk.StringVar(value="/")
-        self.rr_src_sub = tk.StringVar(value="/")
-        self.rr_dst_sub = tk.StringVar(value="/")
-        self.copy_settings_vars = self._create_settings_vars()
+        self.status_text = "Pronto para iniciar."
+        self.details_text = "Selecione uma origem, um destino e inicie a cópia."
 
-        self._load_app_settings()
-
-        self._configure_styles()
+        QApplication.instance().setStyle("Fusion")
         self._build_ui()
-        self.load_remotes()
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._load_app_settings()
+        self._refresh_flags_preview()
+        self.load_remotes(show_errors=False)
+
+    def closeEvent(self, event):
+        try:
+            self._save_app_settings(show_feedback=False)
+        except Exception:
+            pass
+        super().closeEvent(event)
 
     def _resolve_rclone_bin(self):
         base_dir = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
@@ -192,6 +395,27 @@ class RcloneManagerGUI(tk.Tk):
 
         return bundled
 
+    def _resolve_asset_path(self, *parts):
+        candidates = [
+            getattr(sys, "_MEIPASS", None),
+            os.path.dirname(os.path.abspath(__file__)),
+            os.path.dirname(sys.executable),
+        ]
+        for base_dir in candidates:
+            if not base_dir:
+                continue
+            candidate = os.path.join(base_dir, *parts)
+            if os.path.isfile(candidate):
+                return candidate
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), *parts)
+
+    def _load_app_icon(self):
+        for filename in ("app_icon.ico", "app_icon.png"):
+            icon_path = self._resolve_asset_path("assets", filename)
+            if os.path.isfile(icon_path):
+                return QIcon(icon_path)
+        return QIcon()
+
     def _resolve_settings_path(self):
         candidates = [
             os.path.dirname(os.path.abspath(__file__)),
@@ -202,477 +426,671 @@ class RcloneManagerGUI(tk.Tk):
             try:
                 os.makedirs(base_dir, exist_ok=True)
                 probe = os.path.join(base_dir, ".backup_manager_probe")
-                with open(probe, "w", encoding="utf-8") as fh:
-                    fh.write("ok")
+                with open(probe, "w", encoding="utf-8") as handle:
+                    handle.write("ok")
                 os.remove(probe)
                 return os.path.join(base_dir, "backup_manager.settings.json")
             except Exception:
                 continue
         return os.path.join(tempfile.gettempdir(), "backup_manager.settings.json")
 
-    def _create_settings_vars(self):
-        return {
-            key: (tk.BooleanVar(value=value) if isinstance(value, bool) else tk.StringVar(value=str(value)))
-            for key, value in DEFAULT_COPY_SETTINGS.items()
-        }
-
-    def _collect_copy_settings(self):
-        settings = {}
-        for key, var in self.copy_settings_vars.items():
-            value = var.get()
-            if isinstance(var, tk.BooleanVar):
-                settings[key] = bool(value)
-            else:
-                settings[key] = str(value).strip()
-        return settings
-
-    def _load_app_settings(self):
-        settings = {"conf_path": self.conf_path, "copy": dict(DEFAULT_COPY_SETTINGS)}
-        try:
-            if os.path.isfile(self.settings_path):
-                with open(self.settings_path, "r", encoding="utf-8") as fh:
-                    loaded = json.load(fh)
-                if isinstance(loaded, dict):
-                    settings["conf_path"] = loaded.get("conf_path", settings["conf_path"])
-                    if isinstance(loaded.get("copy"), dict):
-                        settings["copy"].update(loaded["copy"])
-        except Exception:
-            pass
-
-        self.conf_path = settings["conf_path"]
-        self.conf_var.set(self.conf_path)
-        for key, value in settings["copy"].items():
-            if key in self.copy_settings_vars:
-                self.copy_settings_vars[key].set(value)
-
-    def _save_app_settings(self, show_feedback=False):
-        payload = {
-            "conf_path": self.conf_var.get().strip(),
-            "copy": self._collect_copy_settings(),
-        }
-        with open(self.settings_path, "w", encoding="utf-8") as fh:
-            json.dump(payload, fh, ensure_ascii=False, indent=2)
-        if hasattr(self, "flags_preview_var"):
-            self._refresh_flags_preview()
-        if show_feedback:
-            self._show_message("info", "Configuracoes", "Configuracoes salvas com sucesso.")
-
-    def _reset_copy_settings(self):
-        for key, value in DEFAULT_COPY_SETTINGS.items():
-            self.copy_settings_vars[key].set(value)
-        if hasattr(self, "flags_preview_var"):
-            self._refresh_flags_preview()
-
-    def _on_close(self):
-        try:
-            self._save_app_settings(show_feedback=False)
-        except Exception:
-            pass
-        self.destroy()
-
-    def _configure_styles(self):
-        style = ttk.Style(self)
-        style.theme_use("clam")
-
-        self.option_add("*Font", "{Segoe UI} 10")
-        self.option_add("*TCombobox*Listbox.font", "{Segoe UI} 10")
-
-        style.configure(".", background=SURFACE, foreground=TEXT)
-        style.configure("App.TFrame", background=SURFACE)
-        style.configure("Card.TFrame", background=CARD)
-        style.configure("Hero.TFrame", background=ACCENT)
-        style.configure(
-            "HeroTitle.TLabel",
-            background=ACCENT,
-            foreground="white",
-            font=("Segoe UI Semibold", 18),
-        )
-        style.configure(
-            "HeroBody.TLabel",
-            background=ACCENT,
-            foreground="#dbe7ff",
-            font=("Segoe UI", 10),
-        )
-        style.configure(
-            "Section.TLabel",
-            background=CARD,
-            foreground=TEXT,
-            font=("Segoe UI Semibold", 11),
-        )
-        style.configure(
-            "Value.TLabel",
-            background=CARD,
-            foreground=TEXT,
-            font=("Segoe UI Semibold", 14),
-        )
-        style.configure(
-            "Muted.TLabel",
-            background=CARD,
-            foreground=MUTED,
-            font=("Segoe UI", 9),
-        )
-        style.configure(
-            "Primary.TButton",
-            background=ACCENT,
-            foreground="white",
-            borderwidth=0,
-            focusthickness=0,
-            focuscolor=ACCENT,
-            padding=(16, 10),
-        )
-        style.map(
-            "Primary.TButton",
-            background=[("active", ACCENT_DARK), ("disabled", "#8db1f5")],
-            foreground=[("disabled", "#f5f8ff")],
-        )
-        style.configure(
-            "Secondary.TButton",
-            background="#e7eefc",
-            foreground=ACCENT_DARK,
-            padding=(14, 9),
-            borderwidth=0,
-        )
-        style.map(
-            "Secondary.TButton",
-            background=[("active", "#d5e3ff"), ("disabled", "#eff3fa")],
-            foreground=[("disabled", "#8da2bf")],
-        )
-        style.configure(
-            "Danger.TButton",
-            background="#fde6e8",
-            foreground=ERROR,
-            padding=(14, 9),
-            borderwidth=0,
-        )
-        style.map(
-            "Danger.TButton",
-            background=[("active", "#f9d5d9"), ("disabled", "#f8ecee")],
-            foreground=[("disabled", "#c59197")],
-        )
-        style.configure(
-            "App.TNotebook",
-            background=SURFACE,
-            borderwidth=0,
-            tabmargins=(0, 8, 0, 0),
-        )
-        style.configure(
-            "App.TNotebook.Tab",
-            padding=(16, 9),
-            background="#dce7fb",
-            foreground=TEXT,
-            borderwidth=0,
-        )
-        style.map(
-            "App.TNotebook.Tab",
-            background=[("selected", CARD), ("active", "#e7efff")],
-            foreground=[("selected", ACCENT_DARK)],
-        )
-        style.configure(
-            "App.TLabelframe",
-            background=CARD,
-            bordercolor="#d6e0f0",
-            borderwidth=1,
-            relief="solid",
-            padding=12,
-        )
-        style.configure(
-            "App.TLabelframe.Label",
-            background=CARD,
-            foreground=TEXT,
-            font=("Segoe UI Semibold", 10),
-        )
-        style.configure(
-            "Treeview",
-            background="#fbfcff",
-            foreground=TEXT,
-            fieldbackground="#fbfcff",
-            bordercolor="#d6e0f0",
-            rowheight=28,
-        )
-        style.map(
-            "Treeview",
-            background=[("selected", "#dce7fb")],
-            foreground=[("selected", TEXT)],
-        )
-        style.configure(
-            "Treeview.Heading",
-            background="#edf3ff",
-            foreground=TEXT,
-            relief="flat",
-            font=("Segoe UI Semibold", 10),
-        )
-        style.configure(
-            "App.Horizontal.TProgressbar",
-            troughcolor="#e5ebf5",
-            background=ACCENT,
-            thickness=10,
-            borderwidth=0,
-        )
-        style.configure(
-            "Status.TLabel",
-            background=SURFACE,
-            foreground=TEXT,
-            font=("Segoe UI Semibold", 10),
-        )
-        style.configure(
-            "Hint.TLabel",
-            background=SURFACE,
-            foreground=MUTED,
-            font=("Segoe UI", 9),
-        )
-
     def _build_ui(self):
-        root = ttk.Frame(self, style="App.TFrame", padding=14)
-        root.pack(fill="both", expand=True)
+        self.setStyleSheet(self._build_stylesheet())
+        central = QWidget()
+        central.setObjectName("appRoot")
+        self.setCentralWidget(central)
 
-        self._build_header(root)
+        root = QVBoxLayout(central)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(12)
 
-        notebook = ttk.Notebook(root, style="App.TNotebook")
-        notebook.pack(fill="both", expand=True, pady=(12, 10))
+        root.addWidget(self._build_header())
 
-        t1 = ttk.Frame(notebook, style="App.TFrame", padding=2)
-        t2 = ttk.Frame(notebook, style="App.TFrame", padding=2)
-        t3 = ttk.Frame(notebook, style="App.TFrame", padding=2)
-        t4 = ttk.Frame(notebook, style="App.TFrame", padding=2)
+        self.tabs = QTabWidget()
+        self.tabs.setObjectName("mainTabs")
+        self.tabs.setIconSize(QSize(56, 20))
+        self.tabs.addTab(self._build_tab_local_to_remote(), self._tab_icon("local"), " Local para Remote")
+        self.tabs.addTab(self._build_tab_remote_to_local(), self._tab_icon("download"), " Remote para Local")
+        self.tabs.addTab(self._build_tab_remote_to_remote(), self._tab_icon("remote"), " Remote para Remote")
+        self.tabs.addTab(self._build_tab_settings(), self._tab_icon("settings"), " Configurações")
+        root.addWidget(self.tabs, 1)
 
-        notebook.add(t1, text="Local para Remote")
-        notebook.add(t2, text="Remote para Local")
-        notebook.add(t3, text="Remote para Remote")
-        notebook.add(t4, text="Configuracoes")
+        status_wrap = QFrame()
+        status_layout = QVBoxLayout(status_wrap)
+        status_layout.setContentsMargins(4, 0, 4, 0)
+        status_layout.setSpacing(2)
+        self.status_label = QLabel(self.status_text)
+        self.status_label.setObjectName("statusLabel")
+        self.details_label = QLabel(self.details_text)
+        self.details_label.setObjectName("detailsLabel")
+        status_layout.addWidget(self.status_label)
+        status_layout.addWidget(self.details_label)
+        root.addWidget(status_wrap)
 
-        self._build_tab_local_to_remote(t1)
-        self._build_tab_remote_to_local(t2)
-        self._build_tab_remote_to_remote(t3)
-        self._build_tab_settings(t4)
+    def _build_stylesheet(self):
+        return f"""
+        QMainWindow, QWidget#appRoot {{
+            background: {SURFACE};
+        }}
+        QWidget {{
+            background: transparent;
+            color: {TEXT};
+            font-family: 'Segoe UI';
+            font-size: 10pt;
+        }}
+        #heroCard {{
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #2d7bff, stop:1 #0f4ec9);
+            border: 1px solid rgba(255,255,255,0.18);
+            border-radius: 14px;
+        }}
+        #heroTitle {{
+            color: white;
+            font-size: 21pt;
+            font-weight: 700;
+        }}
+        #heroSubtitle {{
+            color: #dce9ff;
+            font-size: 11pt;
+        }}
+        #heroCircle {{
+            background: rgba(255,255,255,0.08);
+            color: white;
+            border: 1px solid rgba(255,255,255,0.12);
+            border-radius: 40px;
+            min-width: 80px;
+            min-height: 80px;
+            max-width: 80px;
+            max-height: 80px;
+            font-size: 30pt;
+            font-weight: 700;
+        }}
+        #summaryCard, #card {{
+            background: {CARD};
+            border: 1px solid {BORDER};
+            border-radius: 12px;
+        }}
+        #summaryRow {{
+            background: transparent;
+        }}
+        #summaryTitle, #cardTitle {{
+            color: {TEXT};
+            font-size: 12pt;
+            font-weight: 700;
+        }}
+        #summaryText, #mutedLabel {{
+            color: {TEXT_SOFT};
+            font-size: 10pt;
+        }}
+        #sectionDivider {{
+            background: {BORDER};
+            min-height: 1px;
+            max-height: 1px;
+            border: none;
+        }}
+        QTabWidget::pane {{
+            border: none;
+            margin-top: 8px;
+        }}
+        QTabBar::tab {{
+            background: rgba(255,255,255,0.72);
+            border: 1px solid {BORDER};
+            border-bottom: none;
+            border-top-left-radius: 10px;
+            border-top-right-radius: 10px;
+            padding: 12px 18px;
+            margin-right: 6px;
+            color: {TEXT};
+        }}
+        QTabBar::tab:selected {{
+            background: {CARD};
+            color: {ACCENT_DARK};
+            font-weight: 700;
+        }}
+        QLineEdit, QComboBox {{
+            background: #fbfdff;
+            border: 1px solid {BORDER};
+            border-radius: 8px;
+            padding: 8px 10px;
+            min-height: 22px;
+        }}
+        QTextEdit, QPlainTextEdit, QTreeWidget {{
+            background: #fbfdff;
+            border: 1px solid {BORDER};
+            border-radius: 8px;
+        }}
+        QLineEdit:focus, QComboBox:focus, QTextEdit:focus, QPlainTextEdit:focus, QTreeWidget:focus {{
+            border: 1px solid {ACCENT};
+        }}
+        QComboBox::drop-down {{
+            border: none;
+            width: 28px;
+        }}
+        QComboBox::down-arrow {{
+            image: none;
+        }}
+        QComboBox QAbstractItemView {{
+            background: {CARD};
+            color: {TEXT};
+            border: 1px solid {BORDER};
+            selection-background-color: {ACCENT_LIGHT};
+            selection-color: {TEXT};
+        }}
+        QTreeWidget {{
+            padding: 0px;
+        }}
+        QTreeWidget::item {{
+            height: 28px;
+        }}
+        QHeaderView::section {{
+            background: #eef4ff;
+            color: {TEXT};
+            font-weight: 700;
+            border: none;
+            border-bottom: 1px solid {BORDER};
+            padding: 8px;
+        }}
+        QProgressBar {{
+            border: 1px solid {BORDER};
+            border-radius: 8px;
+            background: #eef3fb;
+            min-height: 18px;
+            text-align: center;
+        }}
+        QProgressBar::chunk {{
+            border-radius: 7px;
+            background: {ACCENT};
+        }}
+        QPushButton {{
+            border-radius: 8px;
+            padding: 10px 16px;
+            min-height: 18px;
+            border: 1px solid {BORDER};
+            background: #eef4ff;
+            color: {ACCENT_DARK};
+        }}
+        QPushButton:hover {{
+            background: #e2ecff;
+        }}
+        QPushButton:disabled {{
+            background: #eef2f8;
+            color: #9aa8bf;
+        }}
+        QPushButton[variant="primary"] {{
+            background: {ACCENT};
+            color: white;
+            border: 1px solid {ACCENT};
+            font-weight: 700;
+        }}
+        QPushButton[variant="primary"]:hover {{
+            background: {ACCENT_DARK};
+        }}
+        QPushButton[variant="danger"] {{
+            background: #fff1f2;
+            color: {ERROR};
+            border: 1px solid #ffcad0;
+        }}
+        QPushButton[variant="danger"]:hover {{
+            background: #ffe3e6;
+        }}
+        QCheckBox {{
+            spacing: 8px;
+            background: transparent;
+        }}
+        QCheckBox[role="stateCheck"] {{
+            spacing: 10px;
+            padding: 2px 0;
+            color: {TEXT};
+        }}
+        QCheckBox[role="stateCheck"]:disabled {{
+            color: #97aac8;
+        }}
+        QCheckBox[role="stateCheck"]::indicator {{
+            width: 0px;
+            height: 0px;
+        }}
+        #statusLabel {{
+            font-weight: 700;
+            color: {TEXT};
+        }}
+        #detailsLabel {{
+            color: {TEXT_SOFT};
+        }}
+        #infoButton {{
+            border: none;
+            background: transparent;
+            color: {ACCENT_DARK};
+            font-size: 12pt;
+            padding: 0px;
+            min-width: 18px;
+            max-width: 18px;
+        }}
+        #inAppTooltip {{
+            background: #143760;
+            border: 1px solid #2e5a90;
+            border-radius: 10px;
+        }}
+        #inAppTooltipLabel {{
+            color: white;
+            min-width: 240px;
+            max-width: 320px;
+        }}
+        QScrollArea {{
+            background: transparent;
+            border: none;
+        }}
+        QScrollBar:vertical {{
+            background: transparent;
+            width: 10px;
+            margin: 4px 0 4px 0;
+        }}
+        QScrollBar::handle:vertical {{
+            background: #c9d8ef;
+            border-radius: 5px;
+            min-height: 28px;
+        }}
+        QScrollBar::handle:vertical:hover {{
+            background: #adc4e8;
+        }}
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,
+        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+            background: transparent;
+            border: none;
+            height: 0px;
+        }}
+        """
 
-        status = ttk.Frame(root, style="App.TFrame")
-        status.pack(fill="x")
-        ttk.Label(status, textvariable=self.status_var, style="Status.TLabel").pack(
-            anchor="w"
+    def _tab_icon(self, kind):
+        mapping = {
+            "local": ("disk", "cloud"),
+            "download": ("cloud", "disk"),
+            "remote": ("cloud", "cloud"),
+            "settings": ("gear", None),
+        }
+        source, target = mapping[kind]
+        return self._make_flow_icon(source, target)
+
+    def _make_flow_icon(self, source, target=None):
+        width = 56 if target else 22
+        pixmap = QPixmap(width, 20)
+        pixmap.fill(Qt.transparent)
+
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        if target:
+            self._draw_symbol(painter, source, 0, 1)
+            pen = QPen(QColor(ACCENT_DARK), 2.2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+            painter.setPen(pen)
+            painter.drawLine(19, 10, 35, 10)
+            painter.drawLine(29, 5, 35, 10)
+            painter.drawLine(29, 15, 35, 10)
+            self._draw_symbol(painter, target, 36, 1)
+        else:
+            self._draw_symbol(painter, source, 1, 1)
+
+        painter.end()
+        return QIcon(pixmap)
+
+    def _draw_symbol(self, painter, kind, x, y):
+        color = QColor(ACCENT_DARK)
+        pen = QPen(color, 1.6, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+
+        if kind == "disk":
+            painter.drawRoundedRect(QRectF(x + 1.5, y + 5.0, 14.5, 9.0), 2.4, 2.4)
+            painter.drawLine(x + 4.0, y + 8.2, x + 13.0, y + 8.2)
+            painter.drawPoint(x + 12.5, y + 11.3)
+            return
+
+        if kind == "cloud":
+            path = QPainterPath()
+            path.addEllipse(QRectF(x + 2.2, y + 6.0, 5.2, 5.2))
+            path.addEllipse(QRectF(x + 6.0, y + 3.3, 6.2, 6.2))
+            path.addEllipse(QRectF(x + 10.0, y + 5.3, 5.4, 5.4))
+            path.addRoundedRect(QRectF(x + 4.0, y + 8.0, 10.0, 4.6), 2.0, 2.0)
+            painter.drawPath(path)
+            return
+
+        if kind == "gear":
+            painter.drawEllipse(QRectF(x + 3.8, y + 3.8, 9.4, 9.4))
+            painter.drawEllipse(QRectF(x + 6.6, y + 6.6, 3.8, 3.8))
+            painter.drawLine(x + 8.5, y + 1.2, x + 8.5, y + 3.6)
+            painter.drawLine(x + 8.5, y + 13.4, x + 8.5, y + 15.8)
+            painter.drawLine(x + 1.8, y + 8.5, x + 4.2, y + 8.5)
+            painter.drawLine(x + 12.8, y + 8.5, x + 15.2, y + 8.5)
+            painter.drawLine(x + 3.8, y + 3.8, x + 5.2, y + 5.2)
+            painter.drawLine(x + 11.8, y + 11.8, x + 13.2, y + 13.2)
+            painter.drawLine(x + 11.8, y + 5.2, x + 13.2, y + 3.8)
+            painter.drawLine(x + 3.8, y + 13.2, x + 5.2, y + 11.8)
+
+    def _build_header(self):
+        frame = QFrame()
+        frame.setObjectName("heroCard")
+        layout = QHBoxLayout(frame)
+        layout.setContentsMargins(24, 22, 24, 22)
+        layout.setSpacing(18)
+
+        left = QWidget()
+        left_layout = QHBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(18)
+
+        hero_circle = QLabel("☁")
+        hero_circle.setObjectName("heroCircle")
+        hero_circle.setAlignment(Qt.AlignCenter)
+        left_layout.addWidget(hero_circle, 0, Qt.AlignTop)
+
+        text_box = QVBoxLayout()
+        text_box.setSpacing(8)
+        title = QLabel("Backup Manager")
+        title.setObjectName("heroTitle")
+        subtitle = QLabel(
+            "Gerencie cópias entre pastas locais e remotes do rclone com mais segurança, visibilidade e controle."
         )
-        ttk.Label(status, textvariable=self.details_var, style="Hint.TLabel").pack(
-            anchor="w", pady=(2, 0)
+        subtitle.setObjectName("heroSubtitle")
+        subtitle.setWordWrap(True)
+        text_box.addWidget(title)
+        text_box.addWidget(subtitle)
+        left_layout.addLayout(text_box, 1)
+
+        layout.addWidget(left, 1)
+
+        summary = QFrame()
+        summary.setObjectName("summaryCard")
+        summary.setMinimumWidth(350)
+        summary_layout = QVBoxLayout(summary)
+        summary_layout.setContentsMargins(18, 18, 18, 18)
+        summary_layout.setSpacing(12)
+
+        summary_title = QLabel("Lembretes")
+        summary_title.setObjectName("summaryTitle")
+        summary_layout.addWidget(summary_title)
+
+        self.remote_count_label = QLabel("0 remotes carregados")
+        self.remote_count_label.setObjectName("summaryText")
+        summary_layout.addWidget(self._summary_row(self.style().standardIcon(QStyle.SP_DirIcon), self.remote_count_label))
+
+        summary_layout.addWidget(
+            self._summary_row(
+                self.style().standardIcon(QStyle.SP_FileDialogDetailedView),
+                QLabel("Arquivo de configuração ativo"),
+            )
         )
 
-    def _build_header(self, parent):
-        header = ttk.Frame(parent, style="Hero.TFrame", padding=18)
-        header.pack(fill="x")
-        header.columnconfigure(0, weight=1)
-
-        left = ttk.Frame(header, style="Hero.TFrame")
-        left.grid(row=0, column=0, sticky="nsew")
-        ttk.Label(left, text="Backup Manager", style="HeroTitle.TLabel").pack(anchor="w")
-        ttk.Label(
-            left,
-            text=(
-                "Gerencie copias entre pastas locais e remotes do rclone "
-                "com mais seguranca, visibilidade e controle."
-            ),
-            style="HeroBody.TLabel",
-            wraplength=650,
-            justify="left",
-        ).pack(anchor="w", pady=(8, 0))
-
-        metrics = ttk.Frame(header, style="Card.TFrame", padding=16)
-        metrics.grid(row=0, column=1, sticky="ne", padx=(18, 0))
-        ttk.Label(metrics, text="Remotes", style="Section.TLabel").pack(anchor="w")
-        ttk.Label(metrics, textvariable=self.remote_count_var, style="Value.TLabel").pack(
-            anchor="w", pady=(4, 0)
+        self.conf_preview_label = QLabel(self._shorten_path(self.conf_path))
+        self.conf_preview_label.setWordWrap(True)
+        self.conf_preview_label.setObjectName("summaryText")
+        summary_layout.addWidget(
+            self._summary_row(self.style().standardIcon(QStyle.SP_FileIcon), self.conf_preview_label)
         )
-        ttk.Label(
-            metrics,
-            text="Arquivo de configuracao ativo",
-            style="Muted.TLabel",
-        ).pack(anchor="w", pady=(8, 0))
-        self.conf_preview = ttk.Label(
-            metrics,
-            text=self._shorten_path(self.conf_var.get()),
-            style="Muted.TLabel",
-            wraplength=260,
-            justify="left",
-        )
-        self.conf_preview.pack(anchor="w", pady=(2, 0))
 
-    def _build_tab_local_to_remote(self, parent):
-        form, activity = self._create_transfer_tab_shell(parent)
-        self.progress_lr, self.log_lr = self._build_activity_panel(activity)
-        self._build_source_picker(
-            form,
-            0,
-            "Origem local",
-            self.src_path,
-            [("Arquivo", self._pick_file), ("Pasta", self._pick_folder)],
-            "Escolha um arquivo ou uma pasta do computador para enviar ao remote.",
-        )
-        self.cmb_lr_remote, self.tree_lr = self._build_remote_browser(
-            form,
-            1,
+        layout.addWidget(summary, 0, Qt.AlignTop)
+        return frame
+
+    def _summary_row(self, icon, text_widget):
+        row = QWidget()
+        row.setObjectName("summaryRow")
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+        icon_label = QLabel()
+        icon_label.setPixmap(icon.pixmap(16, 16))
+        layout.addWidget(icon_label, 0, Qt.AlignTop)
+        if isinstance(text_widget, QLabel):
+            text_widget.setObjectName(text_widget.objectName() or "summaryText")
+            layout.addWidget(text_widget, 1)
+        else:
+            label = QLabel(str(text_widget))
+            label.setObjectName("summaryText")
+            layout.addWidget(label, 1)
+        return row
+
+    def _build_tab_local_to_remote(self):
+        page = QWidget()
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(12)
+
+        source_card, source_body = self._create_card("Origem local", "Escolha um arquivo ou uma pasta do computador para enviar ao remote.")
+        self.src_path_edit = QLineEdit()
+        source_body.addWidget(self.src_path_edit)
+        source_actions = QHBoxLayout()
+        source_actions.setSpacing(10)
+        source_actions.addWidget(self._register_button(self._make_button("Arquivo", self._pick_file)))
+        source_actions.addWidget(self._register_button(self._make_button("Pasta", self._pick_folder)))
+        source_actions.addStretch(1)
+        source_body.addLayout(source_actions)
+        self._set_card_compact(source_card)
+        left_layout.addWidget(source_card)
+
+        remote_browser_card, browser = self._build_remote_browser(
             "Remote destino",
-            self._list_lr_root,
-            self.lr_subdir,
-            "Liste o remote e escolha a pasta de destino onde o conteudo local sera copiado.",
+            "Liste o remote e escolha a pasta de destino onde o conteúdo local será copiado.",
+            allow_files=False,
         )
-        self._build_operation_panel(
-            form,
-            2,
+        self.lr_browser = browser
+        self._set_card_expanding(remote_browser_card, min_height=330)
+        left_layout.addWidget(remote_browser_card, 1)
+
+        op_card, op_body = self._create_card(
             "Copiar para remote",
-            "Envia o arquivo ou a pasta local para o caminho remoto selecionado.",
-            self._start_local_to_remote,
-            "Inicia ou cancela a copia do item local para a pasta remota selecionada.",
+            "Inicia ou cancela a cópia do item local para a pasta remota selecionada.",
         )
+        desc = QLabel("Envia o arquivo ou a pasta local para o caminho remoto selecionado.")
+        desc.setObjectName("mutedLabel")
+        desc.setWordWrap(True)
+        op_body.addWidget(desc)
+        actions = QHBoxLayout()
+        actions.setSpacing(10)
+        actions.addWidget(self._register_button(self._make_button("Iniciar cópia", self._start_local_to_remote, "primary")))
+        actions.addWidget(self._register_cancel_button(self._make_button("Cancelar cópia", self._cancel_copy, "danger")))
+        actions.addStretch(1)
+        op_body.addLayout(actions)
+        self._set_card_compact(op_card)
+        left_layout.addWidget(op_card)
 
-        self.tree_lr.bind("<<TreeviewOpen>>", self._on_open_lr)
-        self.tree_lr.bind("<<TreeviewSelect>>", self._on_select_lr)
+        activity_panel, progress, progress_label, log = self._build_activity_panel(
+            "Aqui você acompanha o progresso da operação e o log detalhado retornado pelo rclone."
+        )
+        self.progress_lr = progress
+        self.progress_lr_label = progress_label
+        self.log_lr = log
+        self._set_card_expanding(activity_panel, min_height=420)
 
-    def _build_tab_remote_to_local(self, parent):
-        form, activity = self._create_transfer_tab_shell(parent)
-        self.progress_rl, self.log_rl = self._build_activity_panel(activity)
-        self.cmb_rl_remote, self.tree_rl = self._build_remote_browser(
-            form,
-            0,
+        outer.addWidget(ResponsiveShell(self._wrap_scroll_panel(left_panel), activity_panel))
+        return page
+
+    def _build_tab_remote_to_local(self):
+        page = QWidget()
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(12)
+
+        remote_browser_card, browser = self._build_remote_browser(
             "Remote origem",
-            self._list_rl_root,
-            self.rl_subdir,
-            "Liste o remote e escolha a pasta ou arquivo que sera baixado para o computador.",
+            "Liste o remote e escolha a pasta ou arquivo que será baixado para o computador.",
+            allow_files=True,
         )
-        self._build_folder_picker(
-            form,
-            1,
+        self.rl_browser = browser
+        self._set_card_expanding(remote_browser_card, min_height=330)
+        left_layout.addWidget(remote_browser_card, 1)
+
+        folder_card, folder_body = self._create_card(
             "Destino local",
-            self.dest_local,
-            "Selecionar pasta",
-            self._pick_dest_folder,
-            "Escolha a pasta local que recebera os arquivos copiados do remote.",
+            "Escolha a pasta local que receberá os arquivos copiados do remote.",
         )
-        self._build_operation_panel(
-            form,
-            2,
+        self.dest_local_edit = QLineEdit()
+        folder_body.addWidget(self.dest_local_edit)
+        folder_body.addWidget(self._register_button(self._make_button("Selecionar pasta", self._pick_dest_folder)))
+        self._set_card_compact(folder_card)
+        left_layout.addWidget(folder_card)
+
+        op_card, op_body = self._create_card(
             "Copiar para local",
-            "Baixa o conteudo remoto para a pasta local escolhida.",
-            self._start_remote_to_local,
-            "Inicia ou cancela a copia do remote para a pasta local selecionada.",
+            "Inicia ou cancela a cópia do remote para a pasta local selecionada.",
         )
+        desc = QLabel("Baixa o conteúdo remoto para a pasta local escolhida.")
+        desc.setObjectName("mutedLabel")
+        desc.setWordWrap(True)
+        op_body.addWidget(desc)
+        actions = QHBoxLayout()
+        actions.setSpacing(10)
+        actions.addWidget(self._register_button(self._make_button("Iniciar cópia", self._start_remote_to_local, "primary")))
+        actions.addWidget(self._register_cancel_button(self._make_button("Cancelar cópia", self._cancel_copy, "danger")))
+        actions.addStretch(1)
+        op_body.addLayout(actions)
+        self._set_card_compact(op_card)
+        left_layout.addWidget(op_card)
 
-        self.tree_rl.bind("<<TreeviewOpen>>", self._on_open_rl)
-        self.tree_rl.bind("<<TreeviewSelect>>", self._on_select_rl)
+        activity_panel, progress, progress_label, log = self._build_activity_panel(
+            "Aqui você acompanha o progresso da operação e o log detalhado retornado pelo rclone."
+        )
+        self.progress_rl = progress
+        self.progress_rl_label = progress_label
+        self.log_rl = log
+        self._set_card_expanding(activity_panel, min_height=420)
 
-    def _build_tab_remote_to_remote(self, parent):
-        workspace, activity = self._create_transfer_tab_shell(parent, left_weight=12, right_weight=10)
-        self.progress_rr, self.log_rr = self._build_activity_panel(activity)
+        outer.addWidget(ResponsiveShell(self._wrap_scroll_panel(left_panel), activity_panel))
+        return page
 
-        browser_row = ttk.Frame(workspace, style="Card.TFrame")
-        browser_row.grid(row=0, column=0, sticky="nsew")
-        browser_row.columnconfigure(0, weight=1)
-        browser_row.columnconfigure(1, weight=1)
-        browser_row.rowconfigure(0, weight=1)
-        workspace.rowconfigure(0, weight=1)
+    def _build_tab_remote_to_remote(self):
+        page = QWidget()
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
-        left = ttk.Frame(browser_row, style="Card.TFrame")
-        right = ttk.Frame(browser_row, style="Card.TFrame")
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-        right.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
-        left.columnconfigure(0, weight=1)
-        left.rowconfigure(0, weight=1)
-        right.columnconfigure(0, weight=1)
-        right.rowconfigure(0, weight=1)
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(12)
 
-        self.cmb_rr_src, self.tree_rr_src = self._build_remote_browser(
-            left,
-            0,
+        browsers_wrapper = QWidget()
+        browsers_layout = QVBoxLayout(browsers_wrapper)
+        browsers_layout.setContentsMargins(0, 0, 0, 0)
+        browsers_layout.setSpacing(0)
+
+        src_card, src_browser = self._build_remote_browser(
             "Remote origem",
-            self._list_rr_src,
-            self.rr_src_sub,
-            "Escolha a pasta ou arquivo remoto que sera usado como origem da transferencia.",
+            "Escolha a pasta ou arquivo remoto que será usado como origem da transferência.",
+            allow_files=True,
         )
-        self.cmb_rr_dst, self.tree_rr_dst = self._build_remote_browser(
-            right,
-            0,
+        dst_card, dst_browser = self._build_remote_browser(
             "Remote destino",
-            self._list_rr_dst,
-            self.rr_dst_sub,
-            "Escolha a pasta remota de destino onde o conteudo sera copiado.",
+            "Escolha a pasta remota de destino onde o conteúdo será copiado.",
+            allow_files=False,
         )
-        self._build_dual_operation_panel(
-            workspace,
-            1,
-            "Controla a transferencia entre dois remotes sem passar pelo disco local.",
+        self.rr_src_browser = src_browser
+        self.rr_dst_browser = dst_browser
+        self._set_card_expanding(src_card, min_height=260)
+        self._set_card_expanding(dst_card, min_height=260)
+        browsers_layout.addWidget(ResponsiveShell(src_card, dst_card, threshold=1180, left_stretch=1, right_stretch=1))
+        left_layout.addWidget(browsers_wrapper, 1)
+
+        op_card, op_body = self._create_card(
+            "Transferência entre remotes",
+            "Controla a transferência entre dois remotes sem passar pelo disco local.",
         )
+        desc = QLabel("Replica o conteúdo do remote de origem para o remote de destino escolhido.")
+        desc.setObjectName("mutedLabel")
+        desc.setWordWrap(True)
+        op_body.addWidget(desc)
+        actions = QHBoxLayout()
+        actions.setSpacing(10)
+        actions.addWidget(self._register_button(self._make_button("Iniciar cópia", self._start_remote_to_remote, "primary")))
+        actions.addWidget(self._register_cancel_button(self._make_button("Cancelar cópia", self._cancel_copy, "danger")))
+        actions.addStretch(1)
+        op_body.addLayout(actions)
+        self._set_card_compact(op_card)
+        left_layout.addWidget(op_card)
 
-        self.tree_rr_src.bind("<<TreeviewOpen>>", self._on_open_rr_src)
-        self.tree_rr_src.bind("<<TreeviewSelect>>", self._on_select_rr_src)
-        self.tree_rr_dst.bind("<<TreeviewOpen>>", self._on_open_rr_dst)
-        self.tree_rr_dst.bind("<<TreeviewSelect>>", self._on_select_rr_dst)
-
-    def _build_tab_settings(self, parent):
-        scroll_host = self._create_scrollable_surface(parent)
-        frame = ttk.LabelFrame(scroll_host, text="Configuracao do rclone", style="App.TLabelframe")
-        frame.pack(fill="both", expand=True)
-        frame.columnconfigure(0, weight=1)
-        frame.rowconfigure(1, weight=1)
-
-        top_card = ttk.Frame(frame, style="Card.TFrame")
-        top_card.grid(row=0, column=0, sticky="ew")
-        top_card.columnconfigure(0, weight=1)
-        self._attach_help_icon(
-            top_card,
-            "Define qual arquivo rclone.conf sera usado para carregar os remotes e executar os comandos.",
+        activity_panel, progress, progress_label, log = self._build_activity_panel(
+            "Aqui você acompanha o progresso da operação e o log detalhado retornado pelo rclone."
         )
-        ttk.Label(top_card, text="Arquivo rclone.conf", style="Section.TLabel").grid(
-            row=0, column=0, sticky="w"
+        self.progress_rr = progress
+        self.progress_rr_label = progress_label
+        self.log_rr = log
+        self._set_card_expanding(activity_panel, min_height=420)
+
+        outer.addWidget(
+            ResponsiveShell(self._wrap_scroll_panel(left_panel), activity_panel, left_stretch=12, right_stretch=10)
         )
-        ttk.Entry(top_card, textvariable=self.conf_var).grid(
-            row=1, column=0, sticky="ew", pady=(8, 16)
+        return page
+
+    def _build_tab_settings(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        layout.addWidget(scroll)
+
+        content = QWidget()
+        scroll.setWidget(content)
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(12)
+
+        conf_card, conf_body = self._create_card(
+            "Arquivo rclone.conf",
+            "Define qual arquivo rclone.conf será usado para carregar os remotes e executar os comandos.",
         )
+        self.conf_path_edit = QLineEdit()
+        conf_body.addWidget(self.conf_path_edit)
+        conf_actions = QHBoxLayout()
+        conf_actions.setSpacing(10)
+        conf_actions.addWidget(self._register_button(self._make_button("Procurar", self._pick_conf)))
+        conf_actions.addWidget(self._register_button(self._make_button("Recarregar remotes", lambda: self.load_remotes(show_errors=True))))
+        conf_actions.addWidget(self._register_button(self._make_button("Abrir rclone config", self._run_rclone_config, "primary")))
+        conf_actions.addStretch(1)
+        conf_body.addLayout(conf_actions)
+        self._set_card_compact(conf_card)
+        content_layout.addWidget(conf_card)
 
-        actions = ttk.Frame(top_card, style="Card.TFrame")
-        actions.grid(row=2, column=0, sticky="w")
-        self._register_button(
-            self._make_button(actions, "Procurar", self._pick_conf, variant="secondary")
-        ).pack(side="left", padx=(0, 8))
-        self._register_button(
-            self._make_button(
-                actions, "Recarregar remotes", self.load_remotes, variant="secondary"
-            )
-        ).pack(side="left", padx=(0, 8))
-        self._register_button(
-            self._make_button(
-                actions, "Abrir rclone config", self._run_rclone_config, variant="primary"
-            )
-        ).pack(side="left")
+        body = QWidget()
+        body_layout = QHBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(12)
+        content_layout.addWidget(body, 1)
 
-        body = ttk.Frame(frame, style="Card.TFrame")
-        body.grid(row=1, column=0, sticky="nsew", pady=(16, 0))
-        body.columnconfigure(0, weight=1)
-        body.columnconfigure(1, weight=1)
-        body.rowconfigure(0, weight=1)
+        left_col = QVBoxLayout()
+        left_col.setSpacing(12)
+        right_col = QVBoxLayout()
+        right_col.setSpacing(12)
+        body_layout.addLayout(left_col, 1)
+        body_layout.addLayout(right_col, 1)
 
-        left = ttk.Frame(body, style="Card.TFrame")
-        right = ttk.Frame(body, style="Card.TFrame")
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
-        right.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
-        left.columnconfigure(0, weight=1)
-        right.columnconfigure(0, weight=1)
-
-        self._build_settings_group(
-            left,
-            0,
-            "Comportamento da copia",
+        behavior_card = self._build_settings_group(
+            "Comportamento da cópia",
             [
-                ("create_empty_src_dirs", "Criar diretorios vazios"),
+                ("create_empty_src_dirs", "Criar diretórios vazios"),
                 ("error_on_no_transfer", "Falhar se nada for transferido"),
                 ("fast_list", "Usar fast-list"),
                 ("dry_run", "Executar em dry-run"),
                 ("checksum", "Comparar por checksum"),
-                ("size_only", "Comparar so por tamanho"),
-                ("ignore_existing", "Ignorar arquivos ja existentes"),
+                ("size_only", "Comparar só por tamanho"),
+                ("ignore_existing", "Ignorar arquivos já existentes"),
                 ("update", "Copiar apenas se a origem for mais nova"),
             ],
-            "Define como o rclone decide o que copiar, quando considerar sucesso e se deve simular a operacao.",
+            "Define como o rclone decide o que copiar, quando considerar sucesso e se deve simular a operação.",
         )
-        self._build_settings_group(
-            left,
-            1,
-            "Transferencia",
+        self._set_card_compact(behavior_card)
+        left_col.addWidget(behavior_card)
+        transfer_card = self._build_settings_group(
+            "Transferência",
             [
                 ("stats", "Intervalo de stats"),
                 ("transfers", "Transfers"),
@@ -683,450 +1101,200 @@ class RcloneManagerGUI(tk.Tk):
                 ("buffer_size", "Buffer size"),
                 ("tpslimit", "TPS limit"),
             ],
-            "Ajusta desempenho, concorrencia, retentativas e consumo de recursos durante a copia.",
+            "Ajusta desempenho, concorrência, retentativas e consumo de recursos durante a cópia.",
         )
-        self._build_settings_group(
-            right,
-            0,
-            "Log e diagnostico",
+        self._set_card_compact(transfer_card)
+        left_col.addWidget(transfer_card)
+        left_col.addStretch(1)
+
+        log_card = self._build_settings_group(
+            "Log e diagnóstico",
             [
-                ("log_level", "Nivel de log"),
+                ("log_level", "Nível de log"),
                 ("use_json_log", "Usar log em JSON"),
             ],
-            "Controla a verbosidade do log mostrado na area de atividade e a forma de saida das mensagens.",
+            "Controla a verbosidade do log mostrado na área de atividade e a forma de saída das mensagens.",
         )
-        self._build_settings_summary(
-            right,
-            1,
-            "Mostra a combinacao final de argumentos que sera anexada aos proximos comandos de copia.",
+        self._set_card_compact(log_card)
+        right_col.addWidget(log_card)
+        summary_card = self._build_settings_summary(
+            "Mostra a combinação final de argumentos que será anexada aos próximos comandos de cópia."
         )
+        self._set_card_expanding(summary_card, min_height=300)
+        right_col.addWidget(summary_card, 1)
+        right_col.addStretch(1)
+        return page
 
-    def _create_scrollable_surface(self, parent):
-        shell = ttk.Frame(parent, style="App.TFrame")
-        shell.pack(fill="both", expand=True)
-        content, _, _ = self._create_scrollable_body(
-            shell,
-            background=SURFACE,
-            content_style="App.TFrame",
-            content_padding=(0, 0, 4, 0),
-        )
-        return content
+    def _create_card(self, title, help_text=None):
+        frame = QFrame()
+        frame.setObjectName("card")
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(16, 14, 16, 16)
+        layout.setSpacing(12)
 
-    def _create_scrollable_body(
-        self,
-        parent,
-        background,
-        content_style="App.TFrame",
-        content_padding=(0, 0, 0, 0),
-    ):
-        parent.columnconfigure(0, weight=1)
-        parent.rowconfigure(0, weight=1)
-
-        canvas = tk.Canvas(
-            parent,
-            background=background,
-            highlightthickness=0,
-            borderwidth=0,
-            relief="flat",
-        )
-        canvas.grid(row=0, column=0, sticky="nsew")
-
-        scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
-        scrollbar.grid(row=0, column=1, sticky="ns")
-        canvas.configure(yscrollcommand=scrollbar.set)
-
-        content = ttk.Frame(canvas, style=content_style, padding=content_padding)
-        window_id = canvas.create_window((0, 0), window=content, anchor="nw")
-
-        def _sync_scrollregion(_event=None):
-            canvas.configure(scrollregion=canvas.bbox("all"))
-
-        def _fit_content_width(event):
-            canvas.itemconfigure(window_id, width=event.width)
-
-        def _on_mousewheel(event):
-            step = -int(event.delta / 120) if event.delta else 0
-            if step:
-                canvas.yview_scroll(step, "units")
-
-        def _on_linux_scroll_up(_event):
-            canvas.yview_scroll(-1, "units")
-
-        def _on_linux_scroll_down(_event):
-            canvas.yview_scroll(1, "units")
-
-        def _bind_mousewheel(_event=None):
-            canvas.bind_all("<MouseWheel>", _on_mousewheel, add="+")
-            canvas.bind_all("<Button-4>", _on_linux_scroll_up, add="+")
-            canvas.bind_all("<Button-5>", _on_linux_scroll_down, add="+")
-
-        def _unbind_mousewheel(_event=None):
-            canvas.unbind_all("<MouseWheel>")
-            canvas.unbind_all("<Button-4>")
-            canvas.unbind_all("<Button-5>")
-
-        content.bind("<Configure>", _sync_scrollregion, add="+")
-        canvas.bind("<Configure>", _fit_content_width, add="+")
-        for widget in (parent, canvas, content):
-            widget.bind("<Enter>", _bind_mousewheel, add="+")
-            widget.bind("<Leave>", _unbind_mousewheel, add="+")
-
-        return content, canvas, scrollbar
-
-    def _build_settings_group(self, parent, row, title, fields, help_text=None):
-        card = ttk.LabelFrame(parent, text=title, style="App.TLabelframe")
-        card.grid(row=row, column=0, sticky="ew", pady=(0, 12))
-        card.columnconfigure(2, weight=1)
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        title_label = QLabel(title)
+        title_label.setObjectName("cardTitle")
+        header.addWidget(title_label)
+        header.addStretch(1)
         if help_text:
-            self._attach_help_icon(card, help_text)
+            header.addWidget(InfoButton(help_text, frame))
+        layout.addLayout(header)
 
-        current_row = 0
-        for key, label in fields:
-            var = self.copy_settings_vars[key]
-            if isinstance(var, tk.BooleanVar):
-                check = ttk.Checkbutton(
-                    card,
-                    text=label,
-                    variable=var,
-                    command=self._refresh_flags_preview,
-                )
-                check.grid(row=current_row, column=0, sticky="w", pady=4)
-                self._attach_help_icon(
-                    card,
-                    COPY_SETTING_HELP.get(key, f"Ajuda indisponivel para {label.lower()}."),
-                    row=current_row,
-                    column=1,
-                    padx=(4, 10),
-                    pady=4,
-                )
+        divider = QFrame()
+        divider.setObjectName("sectionDivider")
+        layout.addWidget(divider)
+
+        body = QVBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(12)
+        layout.addLayout(body, 1)
+        return frame, body
+
+    def _set_card_compact(self, card):
+        card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+
+    def _set_card_expanding(self, card, min_height=None):
+        card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        if min_height is not None:
+            card.setMinimumHeight(min_height)
+
+    def _wrap_scroll_panel(self, widget):
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setWidget(widget)
+        return scroll
+
+    def _build_activity_panel(self, help_text):
+        card, body = self._create_card("Atividade", help_text)
+        progress_title = QLabel("Progresso da operação")
+        progress_title.setObjectName("cardTitle")
+        progress_title.setStyleSheet("font-size: 11pt;")
+        body.addWidget(progress_title)
+
+        progress_row = QHBoxLayout()
+        progress_row.setSpacing(10)
+        progress = QProgressBar()
+        progress.setRange(0, 1)
+        progress.setValue(0)
+        progress.setTextVisible(False)
+        percent_label = QLabel("0%")
+        percent_label.setObjectName("mutedLabel")
+        percent_label.setMinimumWidth(34)
+        progress_row.addWidget(progress, 1)
+        progress_row.addWidget(percent_label, 0, Qt.AlignRight)
+        body.addLayout(progress_row)
+
+        log = QTextEdit()
+        log.setReadOnly(True)
+        log.setMinimumHeight(320)
+        body.addWidget(log, 1)
+        return card, progress, percent_label, log
+
+    def _build_remote_browser(self, title, help_text, allow_files):
+        card, body = self._create_card(title, help_text)
+
+        top = QHBoxLayout()
+        top.setSpacing(10)
+        combo = QComboBox()
+        combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        top.addWidget(combo, 1)
+        list_button = self._register_button(self._make_button("Listar"))
+        top.addWidget(list_button)
+        body.addLayout(top)
+
+        tree = QTreeWidget()
+        tree.setColumnCount(3)
+        tree.setHeaderLabels(["Nome", "Tipo", "Caminho"])
+        tree.setRootIsDecorated(True)
+        tree.setAlternatingRowColors(False)
+        tree.setMinimumHeight(160)
+        tree.header().setStretchLastSection(True)
+        tree.header().resizeSection(0, 260)
+        tree.header().resizeSection(1, 110)
+        tree.itemExpanded.connect(lambda item, b=None: self._open_tree_node(browser, item))
+        tree.itemSelectionChanged.connect(lambda b=None: self._sync_selected_path(browser))
+        body.addWidget(tree, 1)
+
+        path_edit = QLineEdit("/")
+        path_edit.setPlaceholderText("Caminho selecionado")
+        body.addWidget(path_edit)
+
+        browser = {
+            "combo": combo,
+            "button": list_button,
+            "tree": tree,
+            "path_edit": path_edit,
+            "allow_files": allow_files,
+        }
+        list_button.clicked.connect(lambda: self._refresh_tree_async(browser, "", None))
+        return card, browser
+
+    def _build_settings_group(self, title, fields, help_text):
+        card, body = self._create_card(title, help_text)
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(10)
+        body.addLayout(grid)
+
+        for row, (key, label) in enumerate(fields):
+            default_value = DEFAULT_COPY_SETTINGS[key]
+            if isinstance(default_value, bool):
+                widget = StateCheckBox(label)
+                widget.setChecked(default_value)
+                widget.stateChanged.connect(self._refresh_flags_preview)
+                grid.addWidget(widget, row, 0)
+                grid.addWidget(InfoButton(COPY_SETTING_HELP.get(key, ""), card), row, 1)
+                grid.setColumnStretch(0, 1)
             else:
-                ttk.Label(card, text=label, style="Muted.TLabel").grid(
-                    row=current_row, column=0, sticky="w", pady=4, padx=(0, 10)
-                )
-                self._attach_help_icon(
-                    card,
-                    COPY_SETTING_HELP.get(key, f"Ajuda indisponivel para {label.lower()}."),
-                    row=current_row,
-                    column=1,
-                    padx=(0, 10),
-                    pady=4,
-                )
+                label_widget = QLabel(label)
+                label_widget.setObjectName("mutedLabel")
+                grid.addWidget(label_widget, row, 0)
+                grid.addWidget(InfoButton(COPY_SETTING_HELP.get(key, ""), card), row, 1)
                 if key == "log_level":
-                    field = ttk.Combobox(card, textvariable=var, values=LOG_LEVELS, state="readonly")
-                    field.bind("<<ComboboxSelected>>", lambda _event: self._refresh_flags_preview())
+                    widget = QComboBox()
+                    widget.addItems(list(LOG_LEVELS))
+                    widget.currentTextChanged.connect(self._refresh_flags_preview)
                 else:
-                    field = ttk.Entry(card, textvariable=var)
-                    var.trace_add("write", self._on_setting_var_changed)
-                field.grid(row=current_row, column=2, sticky="ew", pady=4)
-            current_row += 1
+                    widget = QLineEdit(str(default_value))
+                    widget.textChanged.connect(self._refresh_flags_preview)
+                grid.addWidget(widget, row, 2)
+                grid.setColumnStretch(2, 1)
+            self.copy_settings_widgets[key] = widget
+        return card
 
-    def _build_settings_summary(self, parent, row, help_text=None):
-        card = ttk.LabelFrame(parent, text="Resumo aplicado", style="App.TLabelframe")
-        card.grid(row=row, column=0, sticky="nsew")
-        card.columnconfigure(0, weight=1)
-        card.rowconfigure(1, weight=1)
-        parent.rowconfigure(row, weight=1)
-        if help_text:
-            self._attach_help_icon(card, help_text)
+    def _build_settings_summary(self, help_text):
+        card, body = self._create_card("Resumo aplicado", help_text)
+        hint = QLabel("As opções abaixo serão anexadas aos próximos comandos de cópia.")
+        hint.setObjectName("mutedLabel")
+        hint.setWordWrap(True)
+        body.addWidget(hint)
 
-        ttk.Label(
-            card,
-            text="As opcoes abaixo serao anexadas aos proximos comandos de copia.",
-            style="Muted.TLabel",
-            wraplength=360,
-            justify="left",
-        ).grid(row=0, column=0, sticky="w", pady=(0, 10))
+        self.flags_preview_widget = QPlainTextEdit()
+        self.flags_preview_widget.setReadOnly(True)
+        self.flags_preview_widget.setMinimumHeight(220)
+        body.addWidget(self.flags_preview_widget, 1)
 
-        self.flags_preview_var = tk.StringVar()
-        preview = ScrolledText(
-            card,
-            height=10,
-            wrap="word",
-            bg="#f8fbff",
-            fg=TEXT,
-            relief="flat",
-            borderwidth=1,
-            highlightthickness=1,
-            highlightbackground="#d6e0f0",
-            highlightcolor="#d6e0f0",
-            insertbackground=TEXT,
-            font=("Consolas", 9),
-        )
-        preview.grid(row=1, column=0, sticky="nsew")
-        preview.configure(state="disabled")
-        self.flags_preview_widget = preview
+        actions = QHBoxLayout()
+        actions.setSpacing(10)
+        actions.addWidget(self._register_button(self._make_button("Salvar configurações", lambda: self._save_app_settings(show_feedback=True), "primary")))
+        actions.addWidget(self._register_button(self._make_button("Restaurar padrão", self._reset_settings_ui)))
+        actions.addStretch(1)
+        body.addLayout(actions)
+        return card
 
-        footer = ttk.Frame(card, style="Card.TFrame")
-        footer.grid(row=2, column=0, sticky="w", pady=(12, 0))
-        self._register_button(
-            self._make_button(footer, "Salvar configuracoes", lambda: self._save_app_settings(show_feedback=True), variant="primary")
-        ).pack(side="left", padx=(0, 8))
-        self._register_button(
-            self._make_button(footer, "Restaurar padrao", self._reset_settings_ui, variant="secondary")
-        ).pack(side="left")
-        self._refresh_flags_preview()
-
-    def _create_transfer_tab_shell(self, parent, left_weight=11, right_weight=10):
-        container = ttk.Frame(parent, style="App.TFrame")
-        container.pack(fill="both", expand=True)
-        container.columnconfigure(0, weight=left_weight)
-        container.columnconfigure(1, weight=right_weight)
-        container.rowconfigure(0, weight=1)
-        container.rowconfigure(1, weight=0)
-
-        form = ttk.LabelFrame(container, text="Selecao", style="App.TLabelframe")
-        side = ttk.LabelFrame(container, text="Atividade", style="App.TLabelframe")
-        form.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-        side.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
-        side.columnconfigure(0, weight=1)
-        side.rowconfigure(2, weight=1)
-        form.columnconfigure(0, weight=1)
-
-        def _reflow_transfer_shell(event=None):
-            width = event.width if event is not None else container.winfo_width()
-            if width and width < 1120:
-                container.columnconfigure(0, weight=1)
-                container.columnconfigure(1, weight=0)
-                container.rowconfigure(0, weight=1)
-                container.rowconfigure(1, weight=1)
-                form.grid_configure(row=0, column=0, padx=0, pady=(0, 8))
-                side.grid_configure(row=1, column=0, padx=0, pady=(8, 0))
-            else:
-                container.columnconfigure(0, weight=left_weight)
-                container.columnconfigure(1, weight=right_weight)
-                container.rowconfigure(0, weight=1)
-                container.rowconfigure(1, weight=0)
-                form.grid_configure(row=0, column=0, padx=(0, 8), pady=0)
-                side.grid_configure(row=0, column=1, padx=(8, 0), pady=0)
-
-        container.bind("<Configure>", _reflow_transfer_shell, add="+")
-        self._attach_help_icon(
-            form,
-            "Use esta area para definir origem, destino e o caminho selecionado antes de iniciar a copia.",
-        )
-        self._attach_help_icon(
-            side,
-            "Aqui voce acompanha o progresso da operacao e o log detalhado retornado pelo rclone.",
-        )
-        return form, side
-
-    def _attach_help_icon(self, parent, text, row=None, column=None, padx=0, pady=0):
-        icon = tk.Label(
-            parent,
-            text="ⓘ",
-            bg=CARD,
-            fg=MUTED,
-            cursor="hand2",
-            font=("Segoe UI Semibold", 10),
-        )
-        if row is None or column is None:
-            icon.place(relx=1.0, x=-8, y=2, anchor="ne")
-        else:
-            icon.grid(row=row, column=column, sticky="w", padx=padx, pady=pady)
-        self.tooltips.append(ToolTip(icon, text))
-        return icon
-
-    def _build_activity_panel(self, parent):
-        ttk.Label(
-            parent,
-            text="Progresso da operacao",
-            style="Section.TLabel",
-        ).grid(row=0, column=0, sticky="w")
-        progress_widget = ttk.Progressbar(
-            parent, style="App.Horizontal.TProgressbar", mode="determinate"
-        )
-        progress_widget.grid(row=1, column=0, sticky="ew", pady=(10, 12))
-        log_widget = self._create_log(parent)
-        log_widget.grid(row=2, column=0, sticky="nsew")
-        return progress_widget, log_widget
-
-    def _build_source_picker(self, parent, row, title, variable, actions, help_text=None):
-        frame = ttk.LabelFrame(parent, text=title, style="App.TLabelframe")
-        frame.grid(row=row, column=0, sticky="ew", pady=(0, 12))
-        frame.columnconfigure(0, weight=1)
-        if help_text:
-            self._attach_help_icon(frame, help_text)
-        ttk.Entry(frame, textvariable=variable).pack(fill="x", pady=(0, 10))
-        buttons = ttk.Frame(frame, style="Card.TFrame")
-        buttons.pack(anchor="w")
-        for label, command in actions:
-            self._register_button(
-                self._make_button(buttons, label, command, variant="secondary")
-            ).pack(side="left", padx=(0, 8))
-
-    def _build_folder_picker(self, parent, row, title, variable, button_text, command, help_text=None):
-        frame = ttk.LabelFrame(parent, text=title, style="App.TLabelframe")
-        frame.grid(row=row, column=0, sticky="ew", pady=(0, 12))
-        frame.columnconfigure(0, weight=1)
-        if help_text:
-            self._attach_help_icon(frame, help_text)
-        ttk.Entry(frame, textvariable=variable).pack(fill="x", pady=(0, 10))
-        self._register_button(
-            self._make_button(frame, button_text, command, variant="secondary")
-        ).pack(anchor="w")
-
-    def _build_remote_browser(self, parent, row, title, list_command, path_variable, help_text=None):
-        frame = ttk.LabelFrame(parent, text=title, style="App.TLabelframe")
-        frame.grid(row=row, column=0, sticky="nsew", pady=(0, 12))
-        frame.columnconfigure(0, weight=1)
-        frame.rowconfigure(1, weight=1)
-        parent.rowconfigure(row, weight=1)
-        if help_text:
-            self._attach_help_icon(frame, help_text)
-
-        top = ttk.Frame(frame, style="Card.TFrame")
-        top.grid(row=0, column=0, sticky="ew")
-        top.columnconfigure(0, weight=1)
-        combo = ttk.Combobox(top, state="readonly")
-        combo.grid(row=0, column=0, sticky="ew", padx=(0, 8))
-        self._register_button(
-            self._make_button(top, "Listar", list_command, variant="secondary")
-        ).grid(row=0, column=1, sticky="e")
-
-        tree = self._create_tree(frame)
-        tree.grid(row=1, column=0, sticky="nsew", pady=(12, 12))
-
-        ttk.Label(frame, text="Caminho selecionado", style="Muted.TLabel").grid(
-            row=2, column=0, sticky="w"
-        )
-        ttk.Entry(frame, textvariable=path_variable).grid(
-            row=3, column=0, sticky="ew", pady=(6, 0)
-        )
-        return combo, tree
-
-    def _build_operation_panel(self, parent, row, title, description, command, help_text=None):
-        panel = ttk.LabelFrame(parent, text=title, style="App.TLabelframe")
-        panel.grid(row=row, column=0, sticky="ew")
-        panel.columnconfigure(0, weight=1)
-        if help_text:
-            self._attach_help_icon(panel, help_text)
-        ttk.Label(
-            panel,
-            text=description,
-            style="Muted.TLabel",
-            wraplength=420,
-            justify="left",
-        ).grid(row=0, column=0, sticky="w", pady=(0, 12))
-
-        actions = ttk.Frame(panel, style="Card.TFrame")
-        actions.grid(row=1, column=0, sticky="w")
-        self._register_button(
-            self._make_button(actions, "Iniciar copia", command, variant="primary")
-        ).pack(side="left", padx=(0, 8))
-        self._register_cancel_button(
-            self._make_button(actions, "Cancelar copia", self._cancel_copy, variant="danger")
-        ).pack(side="left")
-
-    def _build_dual_operation_panel(self, parent, row, help_text=None):
-        panel = ttk.LabelFrame(parent, text="Transferencia entre remotes", style="App.TLabelframe")
-        panel.grid(row=row, column=0, sticky="ew")
-        panel.columnconfigure(0, weight=1)
-        if help_text:
-            self._attach_help_icon(panel, help_text)
-        ttk.Label(
-            panel,
-            text="Replica o conteudo do remote de origem para o remote de destino escolhido.",
-            style="Muted.TLabel",
-            wraplength=900,
-            justify="left",
-        ).grid(row=0, column=0, sticky="w", pady=(0, 12))
-
-        actions = ttk.Frame(panel, style="Card.TFrame")
-        actions.grid(row=1, column=0, sticky="w")
-        self._register_button(
-            self._make_button(
-                actions, "Iniciar copia", self._start_remote_to_remote, variant="primary"
-            )
-        ).pack(side="left", padx=(0, 8))
-        self._register_cancel_button(
-            self._make_button(actions, "Cancelar copia", self._cancel_copy, variant="danger")
-        ).pack(side="left")
-
-    def _create_tree(self, parent):
-        tree = ttk.Treeview(parent, columns=("kind", "fullpath"), show="tree headings", height=10)
-        tree.heading("#0", text="Nome")
-        tree.heading("kind", text="Tipo")
-        tree.heading("fullpath", text="Caminho")
-        tree.column("#0", width=240, anchor="w")
-        tree.column("kind", width=90, anchor="center")
-        tree.column("fullpath", width=300, anchor="w")
-        return tree
-
-    def _kind_label(self, kind):
-        labels = {
-            "dir": "Pasta",
-            "file": "Arquivo",
-            "loading": "...",
-        }
-        return labels.get((kind or "").strip().lower(), kind)
-
-    def _kind_icon(self, kind):
-        icons = {
-            "dir": "📁",
-            "file": "📄",
-            "loading": "⏳",
-        }
-        return icons.get((kind or "").strip().lower(), "•")
-
-    def _item_text(self, name, kind):
-        return f"{self._kind_icon(kind)} {name}"
-
-    def _create_log(self, parent):
-        log = ScrolledText(
-            parent,
-            height=12,
-            wrap="word",
-            bg="#f8fbff",
-            fg=TEXT,
-            relief="flat",
-            borderwidth=1,
-            highlightthickness=1,
-            highlightbackground="#d6e0f0",
-            highlightcolor="#d6e0f0",
-            insertbackground=TEXT,
-            font=("Consolas", 9),
-        )
-        log.configure(state="disabled")
-        self.log_widgets.append(log)
-        return log
-
-    def _make_button(self, parent, text, command, variant="secondary"):
-        palette = {
-            "primary": {
-                "bg": ACCENT,
-                "fg": "white",
-                "activebackground": ACCENT_DARK,
-                "activeforeground": "white",
-            },
-            "secondary": {
-                "bg": "#e7eefc",
-                "fg": ACCENT_DARK,
-                "activebackground": "#d5e3ff",
-                "activeforeground": ACCENT_DARK,
-            },
-            "danger": {
-                "bg": "#fde6e8",
-                "fg": ERROR,
-                "activebackground": "#f7cfd4",
-                "activeforeground": ERROR,
-            },
-        }[variant]
-        return tk.Button(
-            parent,
-            text=text,
-            command=command,
-            bg=palette["bg"],
-            fg=palette["fg"],
-            activebackground=palette["activebackground"],
-            activeforeground=palette["activeforeground"],
-            relief="flat",
-            bd=0,
-            padx=14,
-            pady=8,
-            highlightthickness=0,
-            cursor="hand2",
-            font=("Segoe UI Semibold" if variant == "primary" else "Segoe UI", 10),
-        )
+    def _make_button(self, text, callback=None, variant="secondary"):
+        button = QPushButton(text)
+        button.setProperty("variant", variant)
+        button.style().unpolish(button)
+        button.style().polish(button)
+        if callback:
+            button.clicked.connect(callback)
+        return button
 
     def _register_button(self, button):
         self.action_buttons.append(button)
@@ -1134,40 +1302,76 @@ class RcloneManagerGUI(tk.Tk):
 
     def _register_cancel_button(self, button):
         self.cancel_buttons.append(button)
-        return self._register_button(button)
+        self.action_buttons.append(button)
+        return button
 
-    def _shorten_path(self, value, max_len=42):
-        if len(value) <= max_len:
-            return value
-        return f"...{value[-(max_len - 3):]}"
+    def _collect_copy_settings(self):
+        settings = {}
+        for key, widget in self.copy_settings_widgets.items():
+            if isinstance(widget, QCheckBox):
+                settings[key] = widget.isChecked()
+            elif isinstance(widget, QComboBox):
+                settings[key] = widget.currentText().strip()
+            else:
+                settings[key] = widget.text().strip()
+        return settings
 
-    def _rclone_base_cmd(self, config_path=None):
-        if not os.path.isfile(self.rclone_bin):
-            raise FileNotFoundError(
-                "Nao foi possivel localizar o rclone.exe. Mantenha o arquivo ao lado do app."
-            )
-        return [self.rclone_bin, *self._config_args(config_path)]
+    def _load_app_settings(self):
+        settings = {"conf_path": self.conf_path, "copy": dict(DEFAULT_COPY_SETTINGS)}
+        try:
+            if os.path.isfile(self.settings_path):
+                with open(self.settings_path, "r", encoding="utf-8") as handle:
+                    loaded = json.load(handle)
+                if isinstance(loaded, dict):
+                    settings["conf_path"] = loaded.get("conf_path", settings["conf_path"])
+                    if isinstance(loaded.get("copy"), dict):
+                        settings["copy"].update(loaded["copy"])
+        except Exception:
+            pass
 
-    def _config_args(self, config_path=None):
-        path = (config_path if config_path is not None else self.conf_var.get()).strip()
-        if path:
-            return ["--config", path]
-        return []
+        self.conf_path = settings["conf_path"]
+        self.conf_path_edit.setText(self.conf_path)
+        self.conf_preview_label.setText(self._shorten_path(self.conf_path))
+        for key, value in settings["copy"].items():
+            widget = self.copy_settings_widgets.get(key)
+            if widget is None:
+                continue
+            if isinstance(widget, QCheckBox):
+                widget.setChecked(bool(value))
+            elif isinstance(widget, QComboBox):
+                index = widget.findText(str(value))
+                if index >= 0:
+                    widget.setCurrentIndex(index)
+            else:
+                widget.setText(str(value))
 
-    def _remote_target(self, remote, subdir):
-        clean = (subdir or "").strip().strip("/")
-        if clean:
-            return f"{remote}:/{clean}"
-        return f"{remote}:/"
+    def _save_app_settings(self, show_feedback=False):
+        payload = {
+            "conf_path": self.conf_path_edit.text().strip(),
+            "copy": self._collect_copy_settings(),
+        }
+        with open(self.settings_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        self._refresh_flags_preview()
+        if show_feedback:
+            self._show_message("info", "Configurações", "Configurações salvas com sucesso.")
 
-    def _on_setting_var_changed(self, *_args):
-        if hasattr(self, "flags_preview_var"):
-            self._refresh_flags_preview()
+    def _reset_copy_settings(self):
+        for key, value in DEFAULT_COPY_SETTINGS.items():
+            widget = self.copy_settings_widgets.get(key)
+            if isinstance(widget, QCheckBox):
+                widget.setChecked(bool(value))
+            elif isinstance(widget, QComboBox):
+                index = widget.findText(str(value))
+                if index >= 0:
+                    widget.setCurrentIndex(index)
+            else:
+                widget.setText(str(value))
 
     def _reset_settings_ui(self):
         self._reset_copy_settings()
-        self.conf_var.set(self.conf_path)
-        self.conf_preview.configure(text=self._shorten_path(self.conf_var.get()))
+        self.conf_path_edit.setText(self.conf_path)
+        self.conf_preview_label.setText(self._shorten_path(self.conf_path_edit.text().strip()))
         self._refresh_flags_preview()
 
     def _build_copy_flags(self):
@@ -1208,115 +1412,61 @@ class RcloneManagerGUI(tk.Tk):
             value = settings.get(key, "")
             if value:
                 flags.extend([flag, value])
-
         return flags
 
     def _refresh_flags_preview(self):
+        if not hasattr(self, "flags_preview_widget"):
+            return
         preview = " ".join(self._build_copy_flags()) or "(sem flags)"
-        self.flags_preview_widget.configure(state="normal")
-        self.flags_preview_widget.delete("1.0", tk.END)
-        self.flags_preview_widget.insert(tk.END, preview)
-        self.flags_preview_widget.configure(state="disabled")
-
-    def _build_copy_command(self, source, target):
-        return [*self._rclone_base_cmd(), "copy", source, target, *self._build_copy_flags()]
-
-    def _set_status(self, headline, details=None):
-        self.status_var.set(headline)
-        if details is not None:
-            self.details_var.set(details)
-
-    def _set_busy(self, busy, operation_name=""):
-        for button in self.action_buttons:
-            try:
-                button.configure(state="disabled" if busy else "normal")
-            except tk.TclError:
-                pass
-        if busy:
-            for button in self.cancel_buttons:
-                try:
-                    button.configure(state="normal")
-                except tk.TclError:
-                    pass
-
-        if busy:
-            self.status_var.set(f"Executando: {operation_name}")
-        else:
-            if not self.status_var.get().startswith("Erro"):
-                self.status_var.set("Pronto para iniciar.")
-
-    def _append_log(self, widget, text, reset=False):
-        widget.configure(state="normal")
-        if reset:
-            widget.delete("1.0", tk.END)
-        widget.insert(tk.END, text)
-        widget.see(tk.END)
-        widget.configure(state="disabled")
+        self.flags_preview_widget.setPlainText(preview)
 
     def _show_message(self, kind, title, message):
         if kind == "info":
-            messagebox.showinfo(title, message)
+            QMessageBox.information(self, title, message)
         elif kind == "warning":
-            messagebox.showwarning(title, message)
+            QMessageBox.warning(self, title, message)
         else:
-            messagebox.showerror(title, message)
+            QMessageBox.critical(self, title, message)
 
-    def _run_on_ui(self, callback, *args, **kwargs):
-        self.after(0, lambda: callback(*args, **kwargs))
+    def _set_status(self, headline, details=None):
+        self.status_text = headline
+        self.status_label.setText(headline)
+        if details is not None:
+            self.details_text = details
+            self.details_label.setText(details)
 
-    def _start_operation(self, name, cmd, log_widget, progress_widget):
-        if self.active_operation:
-            self._show_message("warning", "Operacao em andamento", "Ja existe uma copia em execucao.")
+    def _set_busy(self, busy, operation_name=""):
+        for button in self.action_buttons:
+            button.setEnabled(not busy)
+        if busy:
+            for button in self.cancel_buttons:
+                button.setEnabled(True)
+            self._set_status(f"Executando: {operation_name}", "Aguardando retorno do rclone...")
+        else:
+            if not self.status_text.startswith("Erro"):
+                self._set_status("Pronto para iniciar.", self.details_text)
+
+    def _append_log(self, widget, text, reset=False):
+        if reset:
+            widget.clear()
+        cursor = widget.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        cursor.insertText(text)
+        widget.setTextCursor(cursor)
+        widget.ensureCursorVisible()
+
+    def _set_progress(self, progress_widget, label_widget, current, total):
+        if total <= 0:
+            progress_widget.setRange(0, 1)
+            progress_widget.setValue(0)
+            label_widget.setText("0%")
             return
+        progress_widget.setRange(0, total)
+        progress_widget.setValue(min(current, total))
+        percent = int((current / total) * 100) if total else 0
+        label_widget.setText(f"{percent}%")
 
-        self.active_operation = {
-            "name": name,
-            "proc": None,
-            "cancelled": False,
-            "log": log_widget,
-            "progress": progress_widget,
-        }
-        self._append_log(log_widget, "", reset=True)
-        progress_widget.configure(value=0, maximum=1)
-        self._set_busy(True, name)
-        self.details_var.set("Aguardando retorno do rclone...")
-
-        threading.Thread(
-            target=self._run_copy_worker,
-            args=(cmd, self.active_operation),
-            daemon=True,
-        ).start()
-
-    def _run_copy_worker(self, cmd, operation):
-        try:
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                bufsize=1,
-            )
-        except Exception as exc:
-            self._run_on_ui(self._finish_operation_error, operation, str(exc))
-            return
-
-        operation["proc"] = proc
-        self._run_on_ui(
-            self._append_log,
-            operation["log"],
-            "Comando iniciado com sucesso.\n\n",
-        )
-
-        for line in iter(proc.stdout.readline, ""):
-            self._run_on_ui(self._append_log, operation["log"], line)
-            self._run_on_ui(self._update_progress_from_line, operation["progress"], line)
-
-        rc = proc.wait()
-        self._run_on_ui(self._finish_operation_result, operation, rc)
-
-    def _update_progress_from_line(self, progress_widget, line):
+    def _update_progress_from_line(self, progress_widget, label_widget, line):
         bytes_match = PAT_BYTES.search(line)
         if bytes_match:
             try:
@@ -1325,8 +1475,8 @@ class RcloneManagerGUI(tk.Tk):
             except ValueError:
                 current = total = 0
             if total > 0:
-                progress_widget.configure(value=current, maximum=total)
-                self.details_var.set(
+                self._set_progress(progress_widget, label_widget, current, total)
+                self.details_label.setText(
                     f"Transferido {bytes_match.group(1)} de {bytes_match.group(2)}."
                 )
                 return
@@ -1336,215 +1486,35 @@ class RcloneManagerGUI(tk.Tk):
             current = int(files_match.group(1))
             total = int(files_match.group(2))
             if total > 0:
-                progress_widget.configure(value=current, maximum=total)
-                self.details_var.set(f"Arquivos transferidos: {current}/{total}.")
+                self._set_progress(progress_widget, label_widget, current, total)
+                self.details_label.setText(f"Arquivos transferidos: {current}/{total}.")
 
-    def _finish_operation_error(self, operation, message):
-        self.active_operation = None
-        self._set_busy(False)
-        self.status_var.set("Erro ao iniciar a operacao.")
-        self.details_var.set(message)
-        self._show_message("error", "Erro", f"Nao foi possivel iniciar a copia:\n{message}")
+    def _shorten_path(self, value, max_len=46):
+        if len(value) <= max_len:
+            return value
+        return f"...{value[-(max_len - 3):]}"
 
-    def _finish_operation_result(self, operation, return_code):
-        if self.active_operation is not operation:
-            return
+    def _config_args(self, config_path=None):
+        path = (config_path if config_path is not None else self.conf_path_edit.text()).strip()
+        if path:
+            return ["--config", path]
+        return []
 
-        self.active_operation = None
-        self._set_busy(False)
-
-        if operation["cancelled"]:
-            self.status_var.set("Operacao cancelada.")
-            self.details_var.set("A copia foi interrompida pelo usuario.")
-            self._show_message("info", "Cancelado", "Copia interrompida.")
-            return
-
-        if return_code == 0:
-            operation["progress"].configure(value=operation["progress"]["maximum"])
-            self.status_var.set("Operacao concluida com sucesso.")
-            self.details_var.set("O rclone finalizou sem erros.")
-            self._show_message("info", "Concluido", "Operacao finalizada com sucesso.")
-            return
-
-        self.status_var.set("Erro durante a operacao.")
-        self.details_var.set(f"O rclone finalizou com codigo {return_code}.")
-        self._show_message(
-            "error",
-            "Falha na copia",
-            f"O rclone finalizou com erro (codigo {return_code}). Consulte o log da operacao.",
-        )
-
-    def _start_local_to_remote(self):
-        source = self.src_path.get().strip()
-        remote = self.cmb_lr_remote.get().strip()
-        if not source or not remote:
-            self._show_message("warning", "Campos obrigatorios", "Informe a origem local e o remote de destino.")
-            return
-        if not os.path.exists(source):
-            self._show_message("error", "Origem invalida", "O caminho local informado nao existe.")
-            return
-
-        target = self._remote_target(remote, self.lr_subdir.get())
-        self._start_operation(
-            "Local para Remote",
-            self._build_copy_command(source, target),
-            self.log_lr,
-            self.progress_lr,
-        )
-
-    def _start_remote_to_local(self):
-        remote = self.cmb_rl_remote.get().strip()
-        destination = self.dest_local.get().strip()
-        if not remote or not destination:
-            self._show_message("warning", "Campos obrigatorios", "Informe o remote de origem e a pasta local de destino.")
-            return
-        if not os.path.isdir(destination):
-            self._show_message("error", "Destino invalido", "Selecione uma pasta local valida.")
-            return
-
-        source = self._remote_target(remote, self.rl_subdir.get())
-        self._start_operation(
-            "Remote para Local",
-            self._build_copy_command(source, destination),
-            self.log_rl,
-            self.progress_rl,
-        )
-
-    def _start_remote_to_remote(self):
-        source_remote = self.cmb_rr_src.get().strip()
-        destination_remote = self.cmb_rr_dst.get().strip()
-        if not source_remote or not destination_remote:
-            self._show_message("warning", "Campos obrigatorios", "Selecione os remotes de origem e destino.")
-            return
-
-        source = self._remote_target(source_remote, self.rr_src_sub.get())
-        target = self._remote_target(destination_remote, self.rr_dst_sub.get())
-        self._start_operation(
-            "Remote para Remote",
-            self._build_copy_command(source, target),
-            self.log_rr,
-            self.progress_rr,
-        )
-
-    def _cancel_copy(self):
-        if not self.active_operation or self.active_operation["proc"] is None:
-            self._show_message("info", "Sem atividade", "Nenhuma copia em andamento.")
-            return
-
-        proc = self.active_operation["proc"]
-        if proc.poll() is not None:
-            self._show_message("info", "Sem atividade", "Nenhuma copia em andamento.")
-            return
-
-        self.active_operation["cancelled"] = True
-        self.details_var.set("Solicitando cancelamento...")
-        try:
-            proc.terminate()
-        except Exception as exc:
-            self._show_message("error", "Erro", f"Nao foi possivel cancelar a copia:\n{exc}")
-
-    def _run_rclone_config(self):
-        try:
-            subprocess.Popen(
-                [*self._rclone_base_cmd(), "config"],
-                creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+    def _rclone_base_cmd(self, config_path=None):
+        if not os.path.isfile(self.rclone_bin):
+            raise FileNotFoundError(
+                "Não foi possível localizar o rclone.exe. Mantenha o arquivo ao lado do app."
             )
-        except Exception as exc:
-            self._show_message(
-                "error",
-                "Erro",
-                f"Nao foi possivel abrir o configurador do rclone:\n{exc}",
-            )
+        return [self.rclone_bin, *self._config_args(config_path)]
 
-    def _pick_conf(self):
-        filename = filedialog.askopenfilename(
-            title="Selecione o arquivo rclone.conf",
-            initialfile="rclone.conf",
-            filetypes=[("Config Rclone", "rclone.conf"), ("Todos", "*.*")],
-        )
-        if filename:
-            self.conf_path = filename
-            self.conf_var.set(filename)
-            self.conf_preview.configure(text=self._shorten_path(filename))
-            self.load_remotes()
+    def _remote_target(self, remote, subdir):
+        clean = (subdir or "").strip().strip("/")
+        if clean:
+            return f"{remote}:/{clean}"
+        return f"{remote}:/"
 
-    def load_remotes(self):
-        path = self.conf_var.get().strip()
-        self.conf_path = path
-        if not os.path.isfile(path):
-            self.remote_count_var.set("0 remotes carregados")
-            self.conf_preview.configure(text=self._shorten_path(path))
-            self._show_message("error", "Arquivo nao encontrado", path)
-            return
-
-        parser = configparser.RawConfigParser()
-        parser.read(path, encoding="utf-8")
-        self.remotes = parser.sections()
-        self.remote_count_var.set(f"{len(self.remotes)} remotes carregados")
-        self.conf_preview.configure(text=self._shorten_path(path))
-
-        combos = (
-            self.cmb_lr_remote,
-            self.cmb_rl_remote,
-            self.cmb_rr_src,
-            self.cmb_rr_dst,
-        )
-        for combo in combos:
-            combo["values"] = self.remotes
-            if self.remotes:
-                combo.current(0)
-            else:
-                combo.set("")
-
-        self._set_status(
-            "Configuracao atualizada.",
-            "Remotes recarregados a partir do arquivo selecionado.",
-        )
-
-    def _list_lr_root(self):
-        self._refresh_tree_async(self.tree_lr, self.cmb_lr_remote.get(), "", "")
-
-    def _list_rl_root(self):
-        self._refresh_tree_async(self.tree_rl, self.cmb_rl_remote.get(), "", "")
-
-    def _list_rr_src(self):
-        self._refresh_tree_async(self.tree_rr_src, self.cmb_rr_src.get(), "", "")
-
-    def _list_rr_dst(self):
-        self._refresh_tree_async(self.tree_rr_dst, self.cmb_rr_dst.get(), "", "")
-
-    def _on_open_lr(self, _event):
-        self._open_tree_node(self.tree_lr, self.cmb_lr_remote.get(), self.lr_subdir, allow_files=False)
-
-    def _on_select_lr(self, _event):
-        self._sync_selected_path(self.tree_lr, self.lr_subdir, allow_files=False)
-
-    def _on_open_rl(self, _event):
-        self._open_tree_node(self.tree_rl, self.cmb_rl_remote.get(), self.rl_subdir, allow_files=True)
-
-    def _on_select_rl(self, _event):
-        self._sync_selected_path(self.tree_rl, self.rl_subdir, allow_files=True)
-
-    def _on_open_rr_src(self, _event):
-        self._open_tree_node(self.tree_rr_src, self.cmb_rr_src.get(), self.rr_src_sub, allow_files=True)
-
-    def _on_select_rr_src(self, _event):
-        self._sync_selected_path(self.tree_rr_src, self.rr_src_sub, allow_files=True)
-
-    def _on_open_rr_dst(self, _event):
-        self._open_tree_node(self.tree_rr_dst, self.cmb_rr_dst.get(), self.rr_dst_sub, allow_files=False)
-
-    def _on_select_rr_dst(self, _event):
-        self._sync_selected_path(self.tree_rr_dst, self.rr_dst_sub, allow_files=False)
-
-    def _item_kind(self, tree, item):
-        raw_kind = (tree.set(item, "kind") or "dir").strip().lower()
-        aliases = {
-            "pasta": "dir",
-            "arquivo": "file",
-            "...": "loading",
-        }
-        return aliases.get(raw_kind, raw_kind)
+    def _build_copy_command(self, source, target):
+        return [*self._rclone_base_cmd(), "copy", source, target, *self._build_copy_flags()]
 
     def _parent_remote_path(self, path):
         clean = (path or "").strip().strip("/")
@@ -1554,154 +1524,338 @@ class RcloneManagerGUI(tk.Tk):
             return "/"
         return clean.rsplit("/", 1)[0] or "/"
 
-    def _sync_selected_path(self, tree, variable, allow_files):
-        item = tree.focus()
-        if item:
-            selected_path = tree.set(item, "fullpath") or "/"
-            if self._item_kind(tree, item) == "file" and not allow_files:
-                parent_path = self._parent_remote_path(selected_path)
-                variable.set(parent_path)
-                self.details_var.set(
-                    "Arquivo selecionado como referencia visual. O destino usa a pasta pai."
-                )
-                return
-            variable.set(selected_path)
+    def _kind_label(self, kind):
+        return {
+            "dir": "Pasta",
+            "file": "Arquivo",
+            "loading": "...",
+        }.get((kind or "").strip().lower(), kind)
 
-    def _open_tree_node(self, tree, remote, variable, allow_files):
-        item = tree.focus()
+    def _kind_icon(self, kind):
+        style = self.style()
+        mapping = {
+            "dir": QStyle.SP_DirIcon,
+            "file": QStyle.SP_FileIcon,
+            "loading": QStyle.SP_BrowserReload,
+        }
+        return style.standardIcon(mapping.get(kind, QStyle.SP_FileIcon))
+
+    def _add_tree_item(self, parent_item, name, kind, full_path):
+        item = QTreeWidgetItem([name, self._kind_label(kind), full_path or "/"])
+        item.setData(0, ROLE_KIND, kind)
+        item.setData(0, ROLE_PATH, full_path or "/")
+        item.setData(0, ROLE_LOADED, kind != "dir")
+        item.setIcon(0, self._kind_icon(kind))
+        parent_item.addChild(item)
+        if kind == "dir":
+            dummy = QTreeWidgetItem(["Carregando...", self._kind_label("loading"), ""])
+            dummy.setData(0, ROLE_KIND, "loading")
+            item.addChild(dummy)
+        return item
+
+    def _clear_tree_children(self, parent_item):
+        while parent_item.childCount():
+            parent_item.takeChild(0)
+
+    def _sync_selected_path(self, browser):
+        tree = browser["tree"]
+        item = tree.currentItem()
         if not item:
             return
-
-        if self._item_kind(tree, item) != "dir":
-            self._sync_selected_path(tree, variable, allow_files=allow_files)
+        selected_path = item.data(0, ROLE_PATH) or "/"
+        kind = item.data(0, ROLE_KIND) or "dir"
+        if kind == "file" and not browser["allow_files"]:
+            parent_path = self._parent_remote_path(selected_path)
+            browser["path_edit"].setText(parent_path)
+            self.details_label.setText(
+                "Arquivo selecionado como referência visual. O destino usa a pasta pai."
+            )
             return
+        browser["path_edit"].setText(selected_path)
 
-        path = tree.set(item, "fullpath")
-        variable.set(path or "/")
-        tree.delete(*tree.get_children(item))
-        self._refresh_tree_async(tree, remote, path, item)
+    def _open_tree_node(self, browser, item):
+        if not item or item.data(0, ROLE_KIND) != "dir":
+            self._sync_selected_path(browser)
+            return
+        if item.data(0, ROLE_LOADED):
+            return
+        self._refresh_tree_async(browser, item.data(0, ROLE_PATH) or "/", item)
 
-    def _refresh_tree_async(self, tree, remote, path, parent_iid):
-        remote = (remote or "").strip()
+    def _refresh_tree_async(self, browser, path="", parent_item=None):
+        remote = browser["combo"].currentText().strip()
         if not remote:
-            self._show_message("warning", "Remote obrigatorio", "Selecione um remote para listar os itens.")
+            self._show_message("warning", "Remote obrigatório", "Selecione um remote para listar os itens.")
             return
 
-        if not parent_iid:
-            tree.delete(*tree.get_children())
+        tree = browser["tree"]
+        if parent_item is None:
+            tree.clear()
+            root_parent = tree.invisibleRootItem()
+        else:
+            root_parent = parent_item
+            self._clear_tree_children(root_parent)
 
-        placeholder = "__loading__" if not parent_iid else f"{parent_iid}__loading__"
-        if tree.exists(placeholder):
-            tree.delete(placeholder)
-        tree.insert(
-            parent_iid,
-            "end",
-            iid=placeholder,
-            text=self._item_text("Carregando...", "loading"),
-            values=(self._kind_label("loading"), "carregando"),
-        )
+        loading = QTreeWidgetItem(["Carregando...", self._kind_label("loading"), "carregando"])
+        loading.setData(0, ROLE_KIND, "loading")
+        loading.setIcon(0, self._kind_icon("loading"))
+        root_parent.addChild(loading)
+        browser["path_edit"].setText(path or "/")
         self._set_status("Carregando itens...", f"Lendo {self._remote_target(remote, path)}")
 
-        config_path = self.conf_var.get().strip()
+        cmd = [*self._rclone_base_cmd(), "lsjson", self._remote_target(remote, path)]
+        context = {
+            "browser": browser,
+            "path": path,
+            "parent_item": parent_item,
+            "remote": remote,
+        }
+        worker = RcloneListWorker(cmd, context)
+        self.list_workers.add(worker)
+        worker.loaded.connect(self._populate_tree_result)
+        worker.finished.connect(lambda: self._cleanup_list_worker(worker))
+        worker.start()
 
-        threading.Thread(
-            target=self._load_tree_worker,
-            args=(tree, remote, path, parent_iid, placeholder, config_path),
-            daemon=True,
-        ).start()
+    def _cleanup_list_worker(self, worker):
+        self.list_workers.discard(worker)
+        worker.deleteLater()
 
-    def _load_tree_worker(self, tree, remote, path, parent_iid, placeholder, config_path):
-        try:
-            target = self._remote_target(remote, path)
-            cmd = [*self._rclone_base_cmd(config_path), "lsjson", target]
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                check=False,
-            )
-            output = result.stdout or result.stderr or "[]"
-            if result.returncode != 0:
-                raise RuntimeError(output.strip())
+    def _populate_tree_result(self, context, items, error):
+        browser = context["browser"]
+        tree = browser["tree"]
+        parent_item = context["parent_item"]
+        path = context["path"]
 
-            entries = json.loads(output)
-            items = sorted(
-                [
-                    {
-                        "name": entry.get("Name", "").strip(),
-                        "kind": "dir" if entry.get("IsDir") else "file",
-                    }
-                    for entry in entries
-                    if entry.get("Name", "").strip()
-                ],
-                key=lambda entry: (entry["kind"] != "dir", entry["name"].lower()),
-            )
-            self._run_on_ui(
-                self._populate_tree_result,
-                tree,
-                path,
-                parent_iid,
-                placeholder,
-                items,
-                None,
-            )
-        except Exception as exc:
-            self._run_on_ui(
-                self._populate_tree_result,
-                tree,
-                path,
-                parent_iid,
-                placeholder,
-                [],
-                str(exc),
-            )
-
-    def _populate_tree_result(self, tree, path, parent_iid, placeholder, items, error):
-        if tree.exists(placeholder):
-            tree.delete(placeholder)
+        target = parent_item or tree.invisibleRootItem()
+        self._clear_tree_children(target)
 
         if error:
-            self.status_var.set("Erro ao listar itens.")
-            self.details_var.set(error)
+            self._set_status("Erro ao listar itens.", error)
             self._show_message("error", "Falha ao listar itens", error)
             return
 
         for entry in items:
-            name = entry["name"]
-            kind = entry["kind"]
-            full = f"{path}/{name}".strip("/")
-            iid = full or name
-            if not tree.exists(iid):
-                tree.insert(
-                    parent_iid,
-                    "end",
-                    iid=iid,
-                    text=self._item_text(name, kind),
-                    values=(self._kind_label(kind), full),
-                )
-                if kind == "dir":
-                    tree.insert(iid, "end", iid=f"{iid}__dummy__", text="")
+            clean_path = "/".join([part for part in [path.strip("/"), entry["name"]] if part])
+            self._add_tree_item(target, entry["name"], entry["kind"], clean_path)
+
+        if parent_item is not None:
+            parent_item.setData(0, ROLE_LOADED, True)
 
         self._set_status("Itens carregados.", "A estrutura remota foi atualizada.")
 
-    def _pick_file(self):
-        filename = filedialog.askopenfilename()
+    def _start_operation(self, name, cmd, log_widget, progress_widget, progress_label):
+        if self.active_operation:
+            self._show_message("warning", "Operação em andamento", "Já existe uma cópia em execução.")
+            return
+
+        worker = RcloneCopyWorker(cmd)
+        operation = {
+            "name": name,
+            "worker": worker,
+            "log": log_widget,
+            "progress": progress_widget,
+            "progress_label": progress_label,
+        }
+        self.active_operation = operation
+        self._append_log(log_widget, "", reset=True)
+        self._set_progress(progress_widget, progress_label, 0, 1)
+        self._set_busy(True, name)
+        self.details_label.setText("Aguardando retorno do rclone...")
+
+        worker.started_ok.connect(lambda: self._append_log(log_widget, "Comando iniciado com sucesso.\n\n"))
+        worker.line_received.connect(lambda line: self._append_log(log_widget, line))
+        worker.line_received.connect(lambda line: self._update_progress_from_line(progress_widget, progress_label, line))
+        worker.failed.connect(self._finish_operation_error)
+        worker.finished_result.connect(self._finish_operation_result)
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+
+    def _finish_operation_error(self, message):
+        self.active_operation = None
+        self._set_busy(False)
+        self._set_status("Erro ao iniciar a operação.", message)
+        self._show_message("error", "Erro", f"Não foi possível iniciar a cópia:\n{message}")
+
+    def _finish_operation_result(self, return_code, cancelled):
+        operation = self.active_operation
+        if not operation:
+            return
+
+        self.active_operation = None
+        self._set_busy(False)
+
+        if cancelled:
+            self._set_status("Operação cancelada.", "A cópia foi interrompida pelo usuário.")
+            self._show_message("info", "Cancelado", "Cópia interrompida.")
+            return
+
+        if return_code == 0:
+            operation["progress"].setValue(operation["progress"].maximum())
+            operation["progress_label"].setText("100%")
+            self._set_status("Operação concluída com sucesso.", "O rclone finalizou sem erros.")
+            self._show_message("info", "Concluído", "Operação finalizada com sucesso.")
+            return
+
+        self._set_status("Erro durante a operação.", f"O rclone finalizou com código {return_code}.")
+        self._show_message(
+            "error",
+            "Falha na cópia",
+            f"O rclone finalizou com erro (código {return_code}). Consulte o log da operação.",
+        )
+
+    def _start_local_to_remote(self):
+        source = self.src_path_edit.text().strip()
+        remote = self.lr_browser["combo"].currentText().strip()
+        if not source or not remote:
+            self._show_message("warning", "Campos obrigatórios", "Informe a origem local e o remote de destino.")
+            return
+        if not os.path.exists(source):
+            self._show_message("error", "Origem inválida", "O caminho local informado não existe.")
+            return
+
+        target = self._remote_target(remote, self.lr_browser["path_edit"].text())
+        self._start_operation(
+            "Local para Remote",
+            self._build_copy_command(source, target),
+            self.log_lr,
+            self.progress_lr,
+            self.progress_lr_label,
+        )
+
+    def _start_remote_to_local(self):
+        remote = self.rl_browser["combo"].currentText().strip()
+        destination = self.dest_local_edit.text().strip()
+        if not remote or not destination:
+            self._show_message("warning", "Campos obrigatórios", "Informe o remote de origem e a pasta local de destino.")
+            return
+        if not os.path.isdir(destination):
+            self._show_message("error", "Destino inválido", "Selecione uma pasta local válida.")
+            return
+
+        source = self._remote_target(remote, self.rl_browser["path_edit"].text())
+        self._start_operation(
+            "Remote para Local",
+            self._build_copy_command(source, destination),
+            self.log_rl,
+            self.progress_rl,
+            self.progress_rl_label,
+        )
+
+    def _start_remote_to_remote(self):
+        source_remote = self.rr_src_browser["combo"].currentText().strip()
+        destination_remote = self.rr_dst_browser["combo"].currentText().strip()
+        if not source_remote or not destination_remote:
+            self._show_message("warning", "Campos obrigatórios", "Selecione os remotes de origem e destino.")
+            return
+
+        source = self._remote_target(source_remote, self.rr_src_browser["path_edit"].text())
+        target = self._remote_target(destination_remote, self.rr_dst_browser["path_edit"].text())
+        self._start_operation(
+            "Remote para Remote",
+            self._build_copy_command(source, target),
+            self.log_rr,
+            self.progress_rr,
+            self.progress_rr_label,
+        )
+
+    def _cancel_copy(self):
+        if not self.active_operation:
+            self._show_message("info", "Sem atividade", "Nenhuma cópia em andamento.")
+            return
+
+        worker = self.active_operation["worker"]
+        if not worker.isRunning():
+            self._show_message("info", "Sem atividade", "Nenhuma cópia em andamento.")
+            return
+
+        self.details_label.setText("Solicitando cancelamento...")
+        worker.cancel()
+
+    def _run_rclone_config(self):
+        try:
+            subprocess.Popen(
+                [*self._rclone_base_cmd(), "config"],
+                creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+            )
+        except Exception as exc:
+            self._show_message("error", "Erro", f"Não foi possível abrir o configurador do rclone:\n{exc}")
+
+    def _pick_conf(self):
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Selecione o arquivo rclone.conf",
+            self.conf_path_edit.text().strip() or "",
+            "Config Rclone (rclone.conf);;Todos (*.*)",
+        )
         if filename:
-            self.src_path.set(filename)
+            self.conf_path = filename
+            self.conf_path_edit.setText(filename)
+            self.conf_preview_label.setText(self._shorten_path(filename))
+            self.load_remotes(show_errors=True)
+
+    def _pick_file(self):
+        filename, _ = QFileDialog.getOpenFileName(self, "Selecione um arquivo")
+        if filename:
+            self.src_path_edit.setText(filename)
 
     def _pick_folder(self):
-        directory = filedialog.askdirectory()
+        directory = QFileDialog.getExistingDirectory(self, "Selecione uma pasta")
         if directory:
-            self.src_path.set(directory)
+            self.src_path_edit.setText(directory)
 
     def _pick_dest_folder(self):
-        directory = filedialog.askdirectory()
+        directory = QFileDialog.getExistingDirectory(self, "Selecione a pasta de destino")
         if directory:
-            self.dest_local.set(directory)
+            self.dest_local_edit.setText(directory)
+
+    def load_remotes(self, show_errors=True):
+        path = self.conf_path_edit.text().strip()
+        self.conf_path = path
+        self.conf_preview_label.setText(self._shorten_path(path))
+
+        if not os.path.isfile(path):
+            self.remotes = []
+            self.remote_count_label.setText("0 remotes carregados")
+            self._update_remote_combos()
+            if show_errors:
+                self._show_message("error", "Arquivo não encontrado", path or "Caminho não informado.")
+            return
+
+        parser = configparser.RawConfigParser()
+        parser.read(path, encoding="utf-8")
+        self.remotes = parser.sections()
+        self.remote_count_label.setText(f"{len(self.remotes)} remotes carregados")
+        self._update_remote_combos()
+        self._set_status(
+            "Configuração atualizada.",
+            "Remotes recarregados a partir do arquivo selecionado.",
+        )
+
+    def _update_remote_combos(self):
+        combos = [
+            self.lr_browser["combo"],
+            self.rl_browser["combo"],
+            self.rr_src_browser["combo"],
+            self.rr_dst_browser["combo"],
+        ]
+        for combo in combos:
+            current = combo.currentText()
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItems(self.remotes)
+            if current and current in self.remotes:
+                combo.setCurrentText(current)
+            elif self.remotes:
+                combo.setCurrentIndex(0)
+            combo.blockSignals(False)
+
+
+def main():
+    app = QApplication(sys.argv)
+    app.setApplicationName("Backup Manager")
+    window = RcloneManagerWindow()
+    window.show()
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":
-    app = RcloneManagerGUI()
-    app.mainloop()
+    main()
