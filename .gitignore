@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Build
+build/
+dist/
+build_stage/
+
+# Tooling cache
+.npm-cache/
+.codex/
+.agents/
+
+# Local app data
+backup_manager.settings.json
+tmp_rclone_test.conf
+ui_test_memory4.conf
+
+# Temporary previews
+remote_combo_preview.png
+remote_combo_popup_preview.png
+remote_manager_check.png
+
+# Logs
+*.log
+
+# OS
+Thumbs.db
+.DS_Store

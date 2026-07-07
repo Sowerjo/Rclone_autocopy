@@ -6,7 +6,7 @@ import subprocess
 import sys
 import tempfile
 
-from PySide6.QtCore import QEvent, QPoint, QRectF, QSize, Qt, QThread, Signal
+from PySide6.QtCore import QEasingCurve, QEvent, QPoint, QRect, QRectF, QSize, Qt, QThread, Signal, QPropertyAnimation
 from PySide6.QtGui import QColor, QCursor, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
@@ -23,10 +23,12 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QListView,
     QScrollArea,
     QSizePolicy,
     QSplitter,
     QStyle,
+    QStyledItemDelegate,
     QTabWidget,
     QTextEdit,
     QToolButton,
@@ -117,6 +119,54 @@ def parse_size(value):
         "TIB": 1024**4,
     }
     return int(float(number) * multiplier[unit.upper()])
+
+
+def hidden_subprocess_kwargs():
+    kwargs = {}
+    if os.name != "nt":
+        return kwargs
+
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    if creationflags:
+        kwargs["creationflags"] = creationflags
+
+    startupinfo_cls = getattr(subprocess, "STARTUPINFO", None)
+    if startupinfo_cls is not None:
+        startupinfo = startupinfo_cls()
+        startf_use_showwindow = getattr(subprocess, "STARTF_USESHOWWINDOW", 0)
+        if startf_use_showwindow:
+            startupinfo.dwFlags |= startf_use_showwindow
+        startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+        kwargs["startupinfo"] = startupinfo
+
+    return kwargs
+
+
+def build_remote_icon(size=18):
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.transparent)
+
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(QColor("#e9f2ff"))
+    painter.drawEllipse(QRectF(0.5, 0.5, size - 1.0, size - 1.0))
+
+    pen = QPen(QColor(ACCENT_DARK), 1.45, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+    painter.setPen(pen)
+    painter.setBrush(Qt.NoBrush)
+
+    scale = size / 18.0
+    x = 1.0 * scale
+    y = 1.0 * scale
+    path = QPainterPath()
+    path.addEllipse(QRectF(x + 2.2 * scale, y + 6.0 * scale, 5.2 * scale, 5.2 * scale))
+    path.addEllipse(QRectF(x + 6.0 * scale, y + 3.3 * scale, 6.2 * scale, 6.2 * scale))
+    path.addEllipse(QRectF(x + 10.0 * scale, y + 5.3 * scale, 5.4 * scale, 5.4 * scale))
+    path.addRoundedRect(QRectF(x + 4.0 * scale, y + 8.0 * scale, 10.0 * scale, 4.6 * scale), 2.0 * scale, 2.0 * scale)
+    painter.drawPath(path)
+    painter.end()
+    return QIcon(pixmap)
 
 
 class InAppToolTip(QFrame):
@@ -227,6 +277,165 @@ class StateCheckBox(QCheckBox):
         return QIcon(pixmap)
 
 
+class RemoteComboDelegate(QStyledItemDelegate):
+    def sizeHint(self, option, index):
+        size = super().sizeHint(option, index)
+        return QSize(size.width(), 48)
+
+    def paint(self, painter, option, index):
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        outer = option.rect.adjusted(6, 3, -6, -3)
+        selected = bool(option.state & QStyle.State_Selected)
+        hovered = bool(option.state & QStyle.State_MouseOver)
+
+        if selected:
+            fill = QColor("#e8f1ff")
+            border = QColor("#bfd6fb")
+        elif hovered:
+            fill = QColor("#f6f9ff")
+            border = QColor("#d7e3f4")
+        else:
+            fill = QColor("#ffffff")
+            border = QColor("#e3ecf9")
+
+        painter.setPen(QPen(border, 1))
+        painter.setBrush(fill)
+        painter.drawRoundedRect(QRectF(outer), 10, 10)
+
+        icon = index.data(Qt.DecorationRole)
+        if isinstance(icon, QIcon):
+            icon.paint(painter, outer.left() + 10, outer.top() + 14, 18, 18)
+
+        text = str(index.data(Qt.DisplayRole) or "").strip()
+        title_rect = option.rect.adjusted(40, 7, -36, -22)
+        subtitle_rect = option.rect.adjusted(40, 24, -36, -6)
+
+        title_font = QFont(option.font)
+        title_font.setBold(True)
+        painter.setFont(title_font)
+        painter.setPen(QColor(TEXT))
+        painter.drawText(title_rect, Qt.AlignLeft | Qt.AlignVCenter | Qt.TextSingleLine, text)
+
+        subtitle_font = QFont(option.font)
+        subtitle_font.setPointSize(max(8, subtitle_font.pointSize() - 1))
+        painter.setFont(subtitle_font)
+        painter.setPen(QColor(TEXT_SOFT))
+        painter.drawText(subtitle_rect, Qt.AlignLeft | Qt.AlignVCenter | Qt.TextSingleLine, "Remote configurado")
+        painter.restore()
+
+
+class RemoteSelectorCombo(QComboBox):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setProperty("role", "remoteSelector")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setIconSize(QSize(18, 18))
+        self.setMinimumHeight(46)
+        self.setMaxVisibleItems(8)
+        self._popup_animation = None
+
+        view = QListView(self)
+        view.setSpacing(4)
+        view.setMouseTracking(True)
+        view.setUniformItemSizes(True)
+        view.setVerticalScrollMode(QListView.ScrollPerPixel)
+        view.setFrameShape(QFrame.NoFrame)
+        self.setView(view)
+        self.setItemDelegate(RemoteComboDelegate(self))
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        rect = self.rect().adjusted(0, 0, -1, -1)
+        has_focus = self.hasFocus()
+        hovered = self.underMouse()
+        fill = QColor("#ffffff" if has_focus or hovered else "#fbfdff")
+        border = QColor(ACCENT if has_focus else "#cbdcf5")
+
+        painter.setPen(QPen(border, 1.2))
+        painter.setBrush(fill)
+        painter.drawRoundedRect(QRectF(rect), 12, 12)
+
+        icon = self.itemIcon(self.currentIndex()) if self.currentIndex() >= 0 else QIcon()
+        icon_rect = QRectF(12, 13, 18, 18)
+        if not icon.isNull():
+            icon.paint(painter, int(icon_rect.x()), int(icon_rect.y()), int(icon_rect.width()), int(icon_rect.height()))
+
+        text_x = 38
+        text = self.currentText().strip() or "Selecione um remote"
+        subtitle = "Remote disponível para navegação" if self.count() else "Nenhum remote carregado"
+
+        title_font = QFont(self.font())
+        title_font.setBold(True)
+        painter.setFont(title_font)
+        painter.setPen(QColor(TEXT))
+        painter.drawText(QRectF(text_x, 7, rect.width() - text_x - 34, 16), text)
+
+        subtitle_font = QFont(self.font())
+        subtitle_font.setPointSize(max(8, subtitle_font.pointSize() - 1))
+        painter.setFont(subtitle_font)
+        painter.setPen(QColor(TEXT_SOFT))
+        painter.drawText(QRectF(text_x, 23, rect.width() - text_x - 34, 14), subtitle)
+
+        arrow_x = rect.right() - 16
+        arrow_y = rect.center().y()
+        painter.setPen(QPen(QColor(ACCENT_DARK), 1.8, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.drawLine(arrow_x - 4, arrow_y - 2, arrow_x, arrow_y + 2)
+        painter.drawLine(arrow_x, arrow_y + 2, arrow_x + 4, arrow_y - 2)
+        painter.end()
+
+    def showPopup(self):
+        super().showPopup()
+        popup = self.view().window()
+        if popup is None:
+            return
+
+        popup.setObjectName("remoteSelectorPopup")
+        popup.setAttribute(Qt.WA_StyledBackground, True)
+        popup.setAutoFillBackground(True)
+        popup.setStyleSheet(
+            "#remoteSelectorPopup {"
+            "background: #f7faff;"
+            "border: 1px solid #d7e3f4;"
+            "border-radius: 14px;"
+            "}"
+        )
+
+        end_rect = popup.geometry()
+        if not end_rect.isValid() or end_rect.height() <= 0:
+            return
+
+        start_rect = QRect(
+            end_rect.x(),
+            end_rect.y() - 12,
+            end_rect.width(),
+            end_rect.height(),
+        )
+        popup.setGeometry(start_rect)
+
+        animation = QPropertyAnimation(popup, b"geometry", self)
+        animation.setDuration(170)
+        animation.setStartValue(start_rect)
+        animation.setEndValue(end_rect)
+        animation.setEasingCurve(QEasingCurve.OutCubic)
+        animation.start()
+        self._popup_animation = animation
+
+    def hidePopup(self):
+        if self._popup_animation is not None:
+            self._popup_animation.stop()
+        super().hidePopup()
+
+    def wheelEvent(self, event):
+        if self.view().isVisible():
+            super().wheelEvent(event)
+            return
+        event.ignore()
+
+
 class RcloneCopyWorker(QThread):
     started_ok = Signal()
     line_received = Signal(str)
@@ -249,6 +458,7 @@ class RcloneCopyWorker(QThread):
                 encoding="utf-8",
                 errors="replace",
                 bufsize=1,
+                **hidden_subprocess_kwargs(),
             )
         except Exception as exc:
             self.failed.emit(str(exc))
@@ -287,6 +497,7 @@ class RcloneListWorker(QThread):
                 encoding="utf-8",
                 errors="replace",
                 check=False,
+                **hidden_subprocess_kwargs(),
             )
             output = result.stdout or result.stderr or "[]"
             if result.returncode != 0:
@@ -361,6 +572,14 @@ class RcloneManagerWindow(QMainWindow):
             os.environ.get("USERPROFILE", ""), r"AppData\Roaming\rclone\rclone.conf"
         )
         self.remotes = []
+        self.remote_configs = {}
+        self.remote_providers = []
+        self.remote_providers_by_prefix = {}
+        self.remote_form_widgets = {}
+        self.remote_flow_context = None
+        self.remote_pending_option_meta = None
+        self.remote_question_input_meta = None
+        self.remote_editor_mode = "create"
         self.active_operation = None
         self.action_buttons = []
         self.cancel_buttons = []
@@ -517,6 +736,25 @@ class RcloneManagerWindow(QMainWindow):
             font-size: 12pt;
             font-weight: 700;
         }}
+        #guideBox {{
+            background: #eef4ff;
+            border: 1px solid #cfe0ff;
+            border-radius: 10px;
+        }}
+        #guideTitle {{
+            color: {TEXT};
+            font-size: 11pt;
+            font-weight: 700;
+        }}
+        #guideText {{
+            color: {TEXT_SOFT};
+            font-size: 10pt;
+        }}
+        #summaryValue {{
+            color: {TEXT};
+            font-size: 10.5pt;
+            font-weight: 600;
+        }}
         #summaryText, #mutedLabel {{
             color: {TEXT_SOFT};
             font-size: 10pt;
@@ -567,6 +805,32 @@ class RcloneManagerWindow(QMainWindow):
         }}
         QComboBox::down-arrow {{
             image: none;
+        }}
+        QComboBox[role="remoteSelector"] {{
+            background: transparent;
+            border: none;
+            padding: 0px;
+            min-height: 46px;
+        }}
+        QComboBox[role="remoteSelector"]::drop-down {{
+            border: none;
+            width: 0px;
+        }}
+        QComboBox[role="remoteSelector"] QAbstractItemView {{
+            background: #f7faff;
+            border: 1px solid #d7e3f4;
+            border-radius: 12px;
+            padding: 6px;
+            outline: 0;
+        }}
+        #selectorBadge {{
+            background: #eef4ff;
+            color: {ACCENT_DARK};
+            border: 1px solid #cfe0ff;
+            border-radius: 11px;
+            padding: 7px 10px;
+            font-size: 9pt;
+            font-weight: 700;
         }}
         QComboBox QAbstractItemView {{
             background: {CARD};
@@ -704,6 +968,7 @@ class RcloneManagerWindow(QMainWindow):
             "local": ("disk", "cloud"),
             "download": ("cloud", "disk"),
             "remote": ("cloud", "cloud"),
+            "manage": ("cloud", "gear"),
             "settings": ("gear", None),
         }
         source, target = mapping[kind]
@@ -1027,6 +1292,295 @@ class RcloneManagerWindow(QMainWindow):
         )
         return page
 
+    def _build_tab_remote_manager(self):
+        page = QWidget()
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(12)
+
+        remote_list_card, remote_list_body = self._create_card(
+            "Seus remotes",
+            "Selecione um remote para editar, revisar a configuração segura ou refazer o login quando o serviço pedir.",
+        )
+        list_hint = QLabel("Dica: para criar um remote novo, use o assistente guiado ao lado.")
+        list_hint.setObjectName("mutedLabel")
+        list_hint.setWordWrap(True)
+        remote_list_body.addWidget(list_hint)
+
+        self.remote_list_tree = QTreeWidget()
+        self.remote_list_tree.setColumnCount(2)
+        self.remote_list_tree.setHeaderLabels(["Remote", "Tipo"])
+        self.remote_list_tree.setRootIsDecorated(False)
+        self.remote_list_tree.setAlternatingRowColors(False)
+        self.remote_list_tree.setMinimumHeight(260)
+        self.remote_list_tree.header().setStretchLastSection(True)
+        self.remote_list_tree.header().resizeSection(0, 220)
+        self.remote_list_tree.itemSelectionChanged.connect(self._handle_remote_selection_changed)
+        remote_list_body.addWidget(self.remote_list_tree, 1)
+
+        list_actions_top = QHBoxLayout()
+        list_actions_top.setSpacing(10)
+        self.remote_edit_button = self._register_button(self._make_button("Editar selecionado", self._load_selected_remote_into_editor))
+        list_actions_top.addWidget(self.remote_edit_button)
+        list_actions_top.addStretch(1)
+        remote_list_body.addLayout(list_actions_top)
+
+        list_actions_bottom = QHBoxLayout()
+        list_actions_bottom.setSpacing(10)
+        self.remote_reconnect_button = self._register_button(self._make_button("Refazer login", self._reconnect_selected_remote))
+        self.remote_delete_button = self._register_button(self._make_button("Excluir", self._delete_selected_remote, "danger"))
+        self.remote_refresh_button = self._register_button(self._make_button("Atualizar lista", lambda: self.load_remotes(show_errors=True)))
+        list_actions_bottom.addWidget(self.remote_reconnect_button)
+        list_actions_bottom.addWidget(self.remote_delete_button)
+        list_actions_bottom.addWidget(self.remote_refresh_button)
+        list_actions_bottom.addStretch(1)
+        remote_list_body.addLayout(list_actions_bottom)
+        self._set_card_expanding(remote_list_card, min_height=360)
+        left_layout.addWidget(remote_list_card, 1)
+
+        detail_card, detail_body = self._create_card(
+            "Remote selecionado",
+            "Resumo rápido do item ativo. A configuração segura só aparece quando você decidir abrir.",
+        )
+        detail_summary = QGridLayout()
+        detail_summary.setContentsMargins(0, 0, 0, 0)
+        detail_summary.setHorizontalSpacing(10)
+        detail_summary.setVerticalSpacing(8)
+        detail_body.addLayout(detail_summary)
+
+        name_title = QLabel("Nome")
+        name_title.setObjectName("mutedLabel")
+        self.remote_summary_name_value = QLabel("Nenhum remote selecionado")
+        self.remote_summary_name_value.setObjectName("summaryValue")
+        self.remote_summary_name_value.setWordWrap(True)
+        detail_summary.addWidget(name_title, 0, 0)
+        detail_summary.addWidget(self.remote_summary_name_value, 0, 1)
+
+        type_title = QLabel("Serviço")
+        type_title.setObjectName("mutedLabel")
+        self.remote_summary_type_value = QLabel("—")
+        self.remote_summary_type_value.setObjectName("summaryValue")
+        self.remote_summary_type_value.setWordWrap(True)
+        detail_summary.addWidget(type_title, 1, 0)
+        detail_summary.addWidget(self.remote_summary_type_value, 1, 1)
+
+        next_title = QLabel("Próximo passo")
+        next_title.setObjectName("mutedLabel")
+        self.remote_summary_hint = QLabel("Selecione um remote na lista para habilitar as ações.")
+        self.remote_summary_hint.setObjectName("mutedLabel")
+        self.remote_summary_hint.setWordWrap(True)
+        detail_summary.addWidget(next_title, 2, 0)
+        detail_summary.addWidget(self.remote_summary_hint, 2, 1)
+        detail_summary.setColumnStretch(1, 1)
+
+        detail_actions = QHBoxLayout()
+        detail_actions.setSpacing(10)
+        self.remote_detail_toggle_button = self._register_button(
+            self._make_button("Mostrar configuração segura", self._toggle_remote_details)
+        )
+        self.remote_detail_refresh_button = self._register_button(
+            self._make_button("Atualizar resumo", self._refresh_selected_remote_details)
+        )
+        detail_actions.addWidget(self.remote_detail_toggle_button)
+        detail_actions.addWidget(self.remote_detail_refresh_button)
+        detail_actions.addWidget(self._register_button(self._make_button("Abrir rclone config", self._run_rclone_config)))
+        detail_actions.addStretch(1)
+        detail_body.addLayout(detail_actions)
+
+        self.remote_redacted_panel = QWidget()
+        remote_redacted_layout = QVBoxLayout(self.remote_redacted_panel)
+        remote_redacted_layout.setContentsMargins(0, 0, 0, 0)
+        remote_redacted_layout.setSpacing(8)
+        redacted_label = QLabel("Configuração segura")
+        redacted_label.setObjectName("mutedLabel")
+        self.remote_redacted_view = QPlainTextEdit()
+        self.remote_redacted_view.setReadOnly(True)
+        self.remote_redacted_view.setMinimumHeight(180)
+        remote_redacted_layout.addWidget(redacted_label)
+        remote_redacted_layout.addWidget(self.remote_redacted_view, 1)
+        self.remote_redacted_panel.setVisible(False)
+        detail_body.addWidget(self.remote_redacted_panel, 1)
+        self._set_card_compact(detail_card)
+        left_layout.addWidget(detail_card)
+
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(12)
+
+        editor_card, editor_body = self._create_card(
+            "Assistente guiado",
+            "Crie ou ajuste um remote sem abrir o terminal. O app mostra primeiro só o essencial e pede etapas extras apenas quando forem necessárias.",
+        )
+        guide_box = QFrame()
+        guide_box.setObjectName("guideBox")
+        guide_layout = QVBoxLayout(guide_box)
+        guide_layout.setContentsMargins(14, 12, 14, 12)
+        guide_layout.setSpacing(6)
+        self.remote_mode_label = QLabel("Agora você está criando um novo remote.")
+        self.remote_mode_label.setObjectName("guideTitle")
+        self.remote_step_hint = QLabel(
+            "1. Dê um nome fácil de reconhecer.\n"
+            "2. Escolha o serviço que deseja conectar.\n"
+            "3. Preencha apenas os campos exibidos e salve."
+        )
+        self.remote_step_hint.setObjectName("guideText")
+        self.remote_step_hint.setWordWrap(True)
+        guide_layout.addWidget(self.remote_mode_label)
+        guide_layout.addWidget(self.remote_step_hint)
+        editor_body.addWidget(guide_box)
+
+        editor_mode_actions = QHBoxLayout()
+        editor_mode_actions.setSpacing(10)
+        self.remote_create_mode_button = self._register_button(self._make_button("Novo remote", self._start_remote_create_mode))
+        self.remote_use_selected_button = self._register_button(
+            self._make_button("Carregar selecionado", self._load_selected_remote_into_editor)
+        )
+        editor_mode_actions.addWidget(self.remote_create_mode_button)
+        editor_mode_actions.addWidget(self.remote_use_selected_button)
+        editor_mode_actions.addStretch(1)
+        editor_body.addLayout(editor_mode_actions)
+
+        header_grid = QGridLayout()
+        header_grid.setContentsMargins(0, 0, 0, 0)
+        header_grid.setHorizontalSpacing(10)
+        header_grid.setVerticalSpacing(10)
+        editor_body.addLayout(header_grid)
+
+        step_one_label = QLabel("Passo 1 — identificação")
+        step_one_label.setObjectName("cardTitle")
+        header_grid.addWidget(step_one_label, 0, 0, 1, 2)
+
+        name_label = QLabel("Nome do remote")
+        name_label.setObjectName("mutedLabel")
+        self.remote_name_edit = QLineEdit()
+        self.remote_name_edit.setPlaceholderText("Ex.: backup-onedrive")
+        self.remote_name_edit.textChanged.connect(lambda _=None: self._refresh_remote_editor_actions())
+        header_grid.addWidget(name_label, 1, 0)
+        header_grid.addWidget(self.remote_name_edit, 1, 1)
+
+        provider_label = QLabel("Serviço")
+        provider_label.setObjectName("mutedLabel")
+        self.remote_provider_combo = QComboBox()
+        self.remote_provider_combo.currentIndexChanged.connect(self._handle_remote_provider_changed)
+        header_grid.addWidget(provider_label, 2, 0)
+        header_grid.addWidget(self.remote_provider_combo, 2, 1)
+
+        self.remote_show_advanced = StateCheckBox("Mostrar campos avançados")
+        self.remote_show_advanced.stateChanged.connect(lambda _=None: self._rebuild_remote_form())
+        header_grid.addWidget(self.remote_show_advanced, 3, 0, 1, 2)
+        header_grid.setColumnStretch(1, 1)
+
+        self.remote_provider_description = QLabel("")
+        self.remote_provider_description.setObjectName("mutedLabel")
+        self.remote_provider_description.setWordWrap(True)
+        editor_body.addWidget(self.remote_provider_description)
+
+        step_two_label = QLabel("Passo 2 — dados do serviço")
+        step_two_label.setObjectName("cardTitle")
+        editor_body.addWidget(step_two_label)
+
+        form_scroll = QScrollArea()
+        form_scroll.setWidgetResizable(True)
+        form_scroll.setFrameShape(QFrame.NoFrame)
+        form_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.remote_form_host = QWidget()
+        self.remote_form_layout = QGridLayout(self.remote_form_host)
+        self.remote_form_layout.setContentsMargins(0, 0, 0, 0)
+        self.remote_form_layout.setHorizontalSpacing(10)
+        self.remote_form_layout.setVerticalSpacing(10)
+        form_scroll.setWidget(self.remote_form_host)
+        editor_body.addWidget(form_scroll, 1)
+
+        editor_actions = QHBoxLayout()
+        editor_actions.setSpacing(10)
+        self.remote_apply_button = self._register_button(self._make_button("Criar remote", self._submit_remote_editor, "primary"))
+        self.remote_reset_button = self._register_button(self._make_button("Limpar formulário", self._start_remote_create_mode))
+        editor_actions.addWidget(self.remote_apply_button)
+        editor_actions.addWidget(self.remote_reset_button)
+        editor_actions.addStretch(1)
+        editor_body.addLayout(editor_actions)
+        self._set_card_expanding(editor_card, min_height=420)
+        right_layout.addWidget(editor_card, 1)
+
+        question_card, question_body = self._create_card(
+            "Continuação do assistente",
+            "Alguns serviços precisam de confirmações extras. Quando isso acontecer, a próxima pergunta aparecerá aqui de forma guiada.",
+        )
+        self.remote_question_hint = QLabel("Nenhuma etapa pendente no momento.")
+        self.remote_question_hint.setObjectName("mutedLabel")
+        self.remote_question_hint.setWordWrap(True)
+        question_body.addWidget(self.remote_question_hint)
+
+        self.remote_question_error = QLabel("")
+        self.remote_question_error.setObjectName("mutedLabel")
+        self.remote_question_error.setWordWrap(True)
+        question_body.addWidget(self.remote_question_error)
+
+        self.remote_question_host = QWidget()
+        self.remote_question_layout = QGridLayout(self.remote_question_host)
+        self.remote_question_layout.setContentsMargins(0, 0, 0, 0)
+        self.remote_question_layout.setHorizontalSpacing(10)
+        self.remote_question_layout.setVerticalSpacing(10)
+        question_body.addWidget(self.remote_question_host)
+
+        question_actions = QHBoxLayout()
+        question_actions.setSpacing(10)
+        self.remote_question_continue_button = self._register_button(
+            self._make_button("Continuar", self._continue_remote_flow, "primary")
+        )
+        self.remote_question_default_button = self._register_button(
+            self._make_button("Usar valor padrão", self._continue_remote_flow_with_default)
+        )
+        self.remote_question_cancel_button = self._register_button(
+            self._make_button("Cancelar etapa", self._cancel_remote_flow)
+        )
+        question_actions.addWidget(self.remote_question_continue_button)
+        question_actions.addWidget(self.remote_question_default_button)
+        question_actions.addWidget(self.remote_question_cancel_button)
+        question_actions.addStretch(1)
+        question_body.addLayout(question_actions)
+        self.remote_question_card = question_card
+        self._set_card_compact(question_card)
+        right_layout.addWidget(question_card)
+
+        log_toggle_row = QHBoxLayout()
+        log_toggle_row.setSpacing(10)
+        self.remote_log_toggle_button = self._register_button(
+            self._make_button("Mostrar detalhes técnicos", self._toggle_remote_log)
+        )
+        log_toggle_row.addWidget(self.remote_log_toggle_button)
+        log_toggle_row.addStretch(1)
+        right_layout.addLayout(log_toggle_row)
+
+        log_card, log_body = self._create_card(
+            "Detalhes técnicos",
+            "Registro opcional do que o rclone devolveu durante a configuração. Use este painel só quando quiser investigar algo mais a fundo.",
+        )
+        self.remote_log_view = QPlainTextEdit()
+        self.remote_log_view.setReadOnly(True)
+        self.remote_log_view.setMinimumHeight(180)
+        log_body.addWidget(self.remote_log_view, 1)
+        self.remote_log_card = log_card
+        self.remote_log_card.setVisible(False)
+        self._set_card_expanding(log_card, min_height=220)
+        right_layout.addWidget(log_card, 1)
+
+        outer.addWidget(
+            ResponsiveShell(self._wrap_scroll_panel(left_panel), self._wrap_scroll_panel(right_panel), left_stretch=9, right_stretch=13)
+        )
+
+        self._update_remote_editor_mode()
+        self._refresh_remote_question_ui()
+        self._set_remote_details_visible(False)
+        self._set_remote_log_visible(False)
+        return page
+
     def _build_tab_settings(self):
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -1199,9 +1753,12 @@ class RcloneManagerWindow(QMainWindow):
 
         top = QHBoxLayout()
         top.setSpacing(10)
-        combo = QComboBox()
+        combo = RemoteSelectorCombo()
         combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         top.addWidget(combo, 1)
+        remote_count = QLabel("0 remotes")
+        remote_count.setObjectName("selectorBadge")
+        top.addWidget(remote_count, 0, Qt.AlignVCenter)
         list_button = self._register_button(self._make_button("Listar"))
         top.addWidget(list_button)
         body.addLayout(top)
@@ -1225,6 +1782,7 @@ class RcloneManagerWindow(QMainWindow):
 
         browser = {
             "combo": combo,
+            "count_label": remote_count,
             "button": list_button,
             "tree": tree,
             "path_edit": path_edit,
@@ -1286,6 +1844,602 @@ class RcloneManagerWindow(QMainWindow):
         actions.addStretch(1)
         body.addLayout(actions)
         return card
+
+    def _clear_layout(self, layout):
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            child_layout = item.layout()
+            if widget is not None:
+                widget.deleteLater()
+            elif child_layout is not None:
+                self._clear_layout(child_layout)
+
+    def _humanize_option_name(self, name):
+        return (name or "").replace("_", " ").strip().title()
+
+    def _provider_display_label(self, provider):
+        prefix = str(provider.get("Prefix") or "").strip()
+        name = str(provider.get("Name") or "").strip()
+        if not prefix:
+            return name
+        if not name or name.lower() == prefix.lower():
+            return prefix
+        return f"{name} ({prefix})"
+
+    def _provider_visible_options(self, provider_meta, include_advanced=False):
+        options = []
+        seen = set()
+        for option in provider_meta.get("Options") or []:
+            name = (option.get("Name") or "").strip()
+            if not name or name == "type" or name in seen:
+                continue
+            if option.get("Hide"):
+                continue
+            if option.get("Advanced") and not include_advanced:
+                continue
+            seen.add(name)
+            options.append(option)
+        return options
+
+    def _option_default_value(self, option):
+        if option.get("DefaultStr") not in (None, ""):
+            return str(option.get("DefaultStr"))
+        default = option.get("Default")
+        if default is None:
+            return ""
+        if isinstance(default, bool):
+            return "true" if default else "false"
+        return str(default)
+
+    def _create_option_widget(self, option, value=""):
+        option_type = str(option.get("Type") or "string").lower()
+        examples = option.get("Examples") or []
+        exclusive = bool(option.get("Exclusive"))
+
+        if option_type == "bool":
+            widget = StateCheckBox("Ativar")
+            widget.setChecked(str(value).strip().lower() in ("1", "true", "yes", "y", "on"))
+            return {"widget": widget, "kind": "bool"}
+
+        if examples and exclusive:
+            widget = QComboBox()
+            if not option.get("Required"):
+                widget.addItem("(usar padrão)", "")
+            selected = str(value)
+            default_value = self._option_default_value(option)
+            for example in examples:
+                example_value = str(example.get("Value", ""))
+                example_help = str(example.get("Help") or "")
+                label = example_value
+                if example_help and example_help != example_value:
+                    label = f"{example_value} — {example_help}"
+                widget.addItem(label, example_value)
+            if selected:
+                index = widget.findData(selected)
+                if index >= 0:
+                    widget.setCurrentIndex(index)
+            elif default_value:
+                index = widget.findData(default_value)
+                if index >= 0:
+                    widget.setCurrentIndex(index)
+            return {"widget": widget, "kind": "combo"}
+
+        widget = QLineEdit()
+        if option.get("IsPassword"):
+            widget.setEchoMode(QLineEdit.Password)
+            widget.setPlaceholderText("Digite um novo valor para substituir o atual")
+        else:
+            placeholder = self._option_default_value(option)
+            if placeholder:
+                widget.setPlaceholderText(f"Padrão: {placeholder}")
+        widget.setText(str(value or ""))
+        return {"widget": widget, "kind": "line"}
+
+    def _read_option_widget_value(self, meta, allow_blank=True):
+        widget = meta["widget"]
+        kind = meta["kind"]
+        if kind == "bool":
+            return "true" if widget.isChecked() else "false"
+        if kind == "combo":
+            value = widget.currentData()
+            if value is None:
+                value = widget.currentText().strip()
+            return str(value).strip()
+        value = widget.text().strip()
+        if value or allow_blank:
+            return value
+        return ""
+
+    def _load_remote_providers(self, show_errors=True):
+        try:
+            cmd = [*self._rclone_base_cmd(""), "config", "providers"]
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+                **hidden_subprocess_kwargs(),
+            )
+            if result.returncode != 0:
+                raise RuntimeError((result.stderr or result.stdout or "").strip() or "Falha ao consultar providers.")
+            providers = json.loads(result.stdout or "[]")
+            self.remote_providers = sorted(
+                [provider for provider in providers if not provider.get("Hide")],
+                key=lambda item: str(item.get("Prefix") or item.get("Name") or "").lower(),
+            )
+            self.remote_providers_by_prefix = {
+                str(provider.get("Prefix") or "").strip(): provider for provider in self.remote_providers
+            }
+            self._populate_remote_provider_combo()
+        except Exception as exc:
+            self.remote_providers = []
+            self.remote_providers_by_prefix = {}
+            if hasattr(self, "remote_provider_combo"):
+                self.remote_provider_combo.clear()
+            if show_errors:
+                self._show_message("error", "Falha ao carregar providers", str(exc))
+
+    def _populate_remote_provider_combo(self):
+        if not hasattr(self, "remote_provider_combo"):
+            return
+        current = self.remote_provider_combo.currentData()
+        favorites = {"onedrive": 0, "drive": 1, "dropbox": 2, "s3": 3, "webdav": 4, "local": 5}
+        providers = sorted(
+            self.remote_providers,
+            key=lambda item: (
+                favorites.get(str(item.get("Prefix") or "").strip(), 99),
+                self._provider_display_label(item).lower(),
+            ),
+        )
+        self.remote_provider_combo.blockSignals(True)
+        self.remote_provider_combo.clear()
+        self.remote_provider_combo.addItem("Selecione um serviço...", "")
+        for provider in providers:
+            prefix = str(provider.get("Prefix") or "").strip()
+            self.remote_provider_combo.addItem(self._provider_display_label(provider), prefix)
+        if current:
+            index = self.remote_provider_combo.findData(current)
+            if index >= 0:
+                self.remote_provider_combo.setCurrentIndex(index)
+            else:
+                self.remote_provider_combo.setCurrentIndex(0)
+        else:
+            self.remote_provider_combo.setCurrentIndex(0)
+        self.remote_provider_combo.blockSignals(False)
+        self._handle_remote_provider_changed()
+
+    def _current_provider_prefix(self):
+        value = self.remote_provider_combo.currentData() if hasattr(self, "remote_provider_combo") else None
+        if value is None and hasattr(self, "remote_provider_combo"):
+            value = self.remote_provider_combo.currentText().split("—", 1)[0].strip()
+        return str(value or "").strip()
+
+    def _current_provider_meta(self):
+        return self.remote_providers_by_prefix.get(self._current_provider_prefix(), {})
+
+    def _handle_remote_provider_changed(self):
+        provider = self._current_provider_meta()
+        description = str(provider.get("Description") or "").strip()
+        if hasattr(self, "remote_provider_description"):
+            self.remote_provider_description.setText(
+                description or "Escolha um serviço para o app montar os campos automaticamente."
+            )
+        if hasattr(self, "remote_show_advanced"):
+            self.remote_show_advanced.setEnabled(bool(provider))
+        self._rebuild_remote_form()
+        self._refresh_remote_editor_actions()
+
+    def _rebuild_remote_form(self, current_values=None):
+        if not hasattr(self, "remote_form_layout"):
+            return
+        self._clear_layout(self.remote_form_layout)
+        self.remote_form_widgets = {}
+
+        provider = self._current_provider_meta()
+        if not provider:
+            placeholder = QLabel("Escolha um serviço acima para começar.")
+            placeholder.setObjectName("mutedLabel")
+            placeholder.setWordWrap(True)
+            self.remote_form_layout.addWidget(placeholder, 0, 0, 1, 3)
+            return
+
+        values = current_values or {}
+        options = self._provider_visible_options(provider, self.remote_show_advanced.isChecked())
+        if not options:
+            placeholder = QLabel("Esse provider não expõe opções básicas extras nesta etapa.")
+            placeholder.setObjectName("mutedLabel")
+            self.remote_form_layout.addWidget(placeholder, 0, 0, 1, 3)
+            return
+
+        for row, option in enumerate(options):
+            option_name = str(option.get("Name") or "").strip()
+            label = QLabel(self._humanize_option_name(option_name))
+            label.setObjectName("mutedLabel")
+            self.remote_form_layout.addWidget(label, row, 0)
+            self.remote_form_layout.addWidget(InfoButton(str(option.get("Help") or ""), self.remote_form_host), row, 1)
+
+            value = values.get(option_name, "")
+            if option.get("Sensitive") or option.get("IsPassword"):
+                value = ""
+            meta = self._create_option_widget(option, value=value)
+            self.remote_form_layout.addWidget(meta["widget"], row, 2)
+            self.remote_form_layout.setColumnStretch(2, 1)
+            self.remote_form_widgets[option_name] = {"option": option, **meta}
+
+    def _update_remote_editor_mode(self):
+        mode_text = "criando novo remote" if self.remote_editor_mode == "create" else "editando remote selecionado"
+        if hasattr(self, "remote_mode_label"):
+            self.remote_mode_label.setText(f"Modo atual: {mode_text}")
+        if hasattr(self, "remote_apply_button"):
+            self.remote_apply_button.setText("Criar remote" if self.remote_editor_mode == "create" else "Salvar alterações")
+        if hasattr(self, "remote_name_edit"):
+            self.remote_name_edit.setEnabled(self.remote_editor_mode == "create")
+        if hasattr(self, "remote_provider_combo"):
+            self.remote_provider_combo.setEnabled(self.remote_editor_mode == "create")
+        if hasattr(self, "remote_step_hint"):
+            if self.remote_editor_mode == "create":
+                self.remote_step_hint.setText(
+                    "1. Escolha o nome e o serviço.\n2. Preencha os campos básicos.\n3. Clique em Criar remote."
+                )
+            else:
+                self.remote_step_hint.setText(
+                    "1. Revise os campos carregados.\n2. Ajuste o que precisar.\n3. Clique em Salvar alterações."
+                )
+        self._refresh_remote_editor_actions()
+
+    def _refresh_remote_editor_actions(self):
+        if not hasattr(self, "remote_apply_button"):
+            return
+        has_name = bool(self.remote_name_edit.text().strip()) if hasattr(self, "remote_name_edit") else False
+        has_provider = bool(self._current_provider_prefix())
+        self.remote_apply_button.setEnabled(has_name and has_provider)
+        if hasattr(self, "remote_show_advanced"):
+            self.remote_show_advanced.setEnabled(has_provider)
+
+    def _refresh_remote_selection_buttons(self):
+        has_selection = bool(self._selected_remote_name())
+        for attr in (
+            "remote_edit_button",
+            "remote_delete_button",
+            "remote_reconnect_button",
+            "remote_use_selected_button",
+            "remote_detail_toggle_button",
+            "remote_detail_refresh_button",
+        ):
+            button = getattr(self, attr, None)
+            if button is not None:
+                button.setEnabled(has_selection)
+
+    def _toggle_remote_details(self):
+        if not hasattr(self, "remote_redacted_panel"):
+            return
+        self._set_remote_details_visible(not self.remote_redacted_panel.isVisible())
+
+    def _set_remote_details_visible(self, visible):
+        if hasattr(self, "remote_redacted_panel"):
+            self.remote_redacted_panel.setVisible(bool(visible))
+        if hasattr(self, "remote_detail_toggle_button"):
+            self.remote_detail_toggle_button.setText(
+                "Ocultar configuração segura" if visible else "Mostrar configuração segura"
+            )
+
+    def _toggle_remote_log(self):
+        if not hasattr(self, "remote_log_card"):
+            return
+        self._set_remote_log_visible(not self.remote_log_card.isVisible())
+
+    def _set_remote_log_visible(self, visible):
+        if hasattr(self, "remote_log_card"):
+            self.remote_log_card.setVisible(bool(visible))
+        if hasattr(self, "remote_log_toggle_button"):
+            self.remote_log_toggle_button.setText(
+                "Ocultar detalhes técnicos" if visible else "Mostrar detalhes técnicos"
+            )
+
+    def _start_remote_create_mode(self):
+        self.remote_editor_mode = "create"
+        self.remote_flow_context = None
+        self.remote_pending_option_meta = None
+        if hasattr(self, "remote_name_edit"):
+            self.remote_name_edit.clear()
+        if hasattr(self, "remote_provider_combo"):
+            self.remote_provider_combo.setCurrentIndex(0)
+        if hasattr(self, "remote_show_advanced"):
+            self.remote_show_advanced.setChecked(False)
+        self._update_remote_editor_mode()
+        self._handle_remote_provider_changed()
+        self._refresh_remote_question_ui()
+
+    def _load_selected_remote_into_editor(self):
+        name = self._selected_remote_name()
+        if not name:
+            self._show_message("warning", "Seleção obrigatória", "Escolha um remote na lista para editar.")
+            return
+
+        remote_data = self.remote_configs.get(name, {})
+        provider = str(remote_data.get("type") or "").strip()
+        if not provider:
+            self._show_message("warning", "Tipo não identificado", "Não foi possível descobrir o tipo do remote selecionado.")
+            return
+
+        self.remote_editor_mode = "update"
+        self.remote_flow_context = None
+        self.remote_pending_option_meta = None
+        self.remote_name_edit.setText(name)
+        index = self.remote_provider_combo.findData(provider)
+        if index >= 0:
+            self.remote_provider_combo.setCurrentIndex(index)
+        self.remote_show_advanced.setChecked(False)
+        self._update_remote_editor_mode()
+        self._rebuild_remote_form(current_values=remote_data)
+        self._refresh_remote_question_ui()
+
+    def _selected_remote_name(self):
+        if not hasattr(self, "remote_list_tree"):
+            return ""
+        item = self.remote_list_tree.currentItem()
+        if not item:
+            return ""
+        return item.text(0).strip()
+
+    def _update_remote_manager_list(self):
+        if not hasattr(self, "remote_list_tree"):
+            return
+        current = self._selected_remote_name()
+        self.remote_list_tree.clear()
+        for name in sorted(self.remote_configs):
+            remote_type = self.remote_configs.get(name, {}).get("type", "")
+            item = QTreeWidgetItem([name, remote_type])
+            item.setIcon(0, self._tab_icon("remote"))
+            self.remote_list_tree.addTopLevelItem(item)
+        if current:
+            self._select_remote_in_manager(current)
+        elif self.remote_list_tree.topLevelItemCount():
+            self.remote_list_tree.setCurrentItem(self.remote_list_tree.topLevelItem(0))
+        else:
+            self.remote_redacted_view.clear()
+        self._refresh_remote_selection_buttons()
+
+    def _select_remote_in_manager(self, name):
+        if not hasattr(self, "remote_list_tree"):
+            return
+        for index in range(self.remote_list_tree.topLevelItemCount()):
+            item = self.remote_list_tree.topLevelItem(index)
+            if item.text(0) == name:
+                self.remote_list_tree.setCurrentItem(item)
+                break
+
+    def _handle_remote_selection_changed(self):
+        self._refresh_remote_selection_buttons()
+        self._refresh_selected_remote_details()
+
+    def _refresh_selected_remote_details(self):
+        name = self._selected_remote_name()
+        if not name:
+            if hasattr(self, "remote_redacted_view"):
+                self.remote_redacted_view.clear()
+            return
+        try:
+            cmd = [*self._rclone_base_cmd(), "config", "redacted", name]
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+                **hidden_subprocess_kwargs(),
+            )
+            if result.returncode != 0:
+                raise RuntimeError((result.stderr or result.stdout or "").strip() or "Falha ao carregar detalhes.")
+            self.remote_redacted_view.setPlainText((result.stdout or "").strip())
+        except Exception as exc:
+            self.remote_redacted_view.setPlainText(f"Não foi possível carregar os detalhes:\n{exc}")
+
+    def _build_remote_seed_pairs(self, provider_prefix, include_type_pair=False):
+        pairs = []
+        if include_type_pair and provider_prefix:
+            pairs.extend(["type", provider_prefix])
+        pairs.extend(["config_fs_advanced", "true" if self.remote_show_advanced.isChecked() else "false"])
+        for name, meta in self.remote_form_widgets.items():
+            value = self._read_option_widget_value(meta)
+            option = meta["option"]
+            if not value:
+                continue
+            if self.remote_editor_mode == "update" and (option.get("Sensitive") or option.get("IsPassword")) and not value:
+                continue
+            pairs.extend([name, value])
+        return pairs
+
+    def _append_remote_log_line(self, text):
+        if not hasattr(self, "remote_log_view"):
+            return
+        self._append_log(self.remote_log_view, f"{text}\n")
+
+    def _submit_remote_editor(self):
+        name = self.remote_name_edit.text().strip()
+        provider_prefix = self._current_provider_prefix()
+        if not name:
+            self._show_message("warning", "Nome obrigatório", "Informe um nome para o remote.")
+            return
+        if not provider_prefix:
+            self._show_message("warning", "Provider obrigatório", "Selecione um tipo de remote.")
+            return
+        if self.remote_editor_mode == "create" and name in self.remote_configs:
+            self._show_message("warning", "Remote existente", "Já existe um remote com esse nome no arquivo atual.")
+            return
+
+        action = "create" if self.remote_editor_mode == "create" else "update"
+        seed_pairs = self._build_remote_seed_pairs(provider_prefix, include_type_pair=(action == "create"))
+        self.remote_flow_context = {
+            "action": action,
+            "name": name,
+            "provider": provider_prefix,
+            "seed_pairs": seed_pairs,
+            "state": None,
+        }
+        self.remote_pending_option_meta = None
+        self.remote_log_view.clear()
+        self._append_remote_log_line(f"Iniciando fluxo {action} para {name}.")
+        self._run_remote_flow_step()
+
+    def _run_remote_flow_step(self, result_value=None):
+        context = self.remote_flow_context
+        if not context:
+            return
+        try:
+            command = [*self._rclone_base_cmd(), "config", context["action"], context["name"]]
+            if context["action"] == "create":
+                command.append(context["provider"])
+            command.extend(context["seed_pairs"])
+            command.extend(["--non-interactive", "--all"])
+            if context.get("state") is not None:
+                command.extend(["--continue", "--state", context["state"], "--result", result_value or ""])
+
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+                **hidden_subprocess_kwargs(),
+            )
+            stdout = (result.stdout or "").strip()
+            stderr = (result.stderr or "").strip()
+            if stdout:
+                self._append_remote_log_line(stdout)
+            if stderr:
+                self._append_remote_log_line(stderr)
+
+            payload = None
+            if stdout.startswith("{"):
+                try:
+                    payload = json.loads(stdout)
+                except Exception:
+                    payload = None
+
+            if result.returncode != 0 and payload is None:
+                raise RuntimeError(stderr or stdout or f"Falha no fluxo ({result.returncode}).")
+
+            if payload is not None:
+                context["state"] = payload.get("State")
+                self.remote_pending_option_meta = payload.get("Option")
+                self._refresh_remote_question_ui(error_text=payload.get("Error") or "")
+                if payload.get("State"):
+                    option_name = self._humanize_option_name((payload.get("Option") or {}).get("Name", "próxima etapa"))
+                    self._set_status("Configuração em andamento.", f"Respondendo: {option_name}.")
+                    return
+
+            self.remote_flow_context = None
+            self.remote_pending_option_meta = None
+            self._refresh_remote_question_ui()
+            self.load_remotes(show_errors=False)
+            self._select_remote_in_manager(context["name"])
+            self._set_status("Remote atualizado.", f"O remote {context['name']} foi salvo no arquivo atual.")
+            self._show_message("info", "Remote salvo", f"O remote {context['name']} foi processado com sucesso.")
+        except Exception as exc:
+            self._set_status("Erro no configurador.", str(exc))
+            self._show_message("error", "Falha no configurador", str(exc))
+
+    def _refresh_remote_question_ui(self, error_text=""):
+        if not hasattr(self, "remote_question_layout"):
+            return
+        self._clear_layout(self.remote_question_layout)
+
+        pending = self.remote_pending_option_meta or {}
+        has_pending = bool(self.remote_flow_context and self.remote_flow_context.get("state"))
+        self.remote_question_card.setVisible(has_pending)
+        self.remote_question_default_button.setEnabled(has_pending)
+        self.remote_question_continue_button.setEnabled(has_pending)
+        self.remote_question_cancel_button.setEnabled(has_pending)
+
+        if not has_pending:
+            self.remote_question_input_meta = None
+            self.remote_question_hint.setText("Nenhuma etapa pendente no momento.")
+            self.remote_question_error.setText("")
+            return
+
+        option_name = str(pending.get("Name") or "Etapa adicional")
+        self.remote_question_hint.setText(str(pending.get("Help") or f"Informe um valor para {option_name}."))
+        self.remote_question_error.setText(error_text)
+
+        label = QLabel(self._humanize_option_name(option_name))
+        label.setObjectName("mutedLabel")
+        self.remote_question_layout.addWidget(label, 0, 0)
+        self.remote_question_layout.addWidget(InfoButton(str(pending.get("Help") or ""), self.remote_question_host), 0, 1)
+        meta = self._create_option_widget(pending, value=self._option_default_value(pending))
+        self.remote_question_layout.addWidget(meta["widget"], 0, 2)
+        self.remote_question_layout.setColumnStretch(2, 1)
+        self.remote_question_input_meta = {"option": pending, **meta}
+
+    def _continue_remote_flow(self):
+        if not getattr(self, "remote_question_input_meta", None):
+            return
+        answer = self._read_option_widget_value(self.remote_question_input_meta)
+        self._run_remote_flow_step(result_value=answer)
+
+    def _continue_remote_flow_with_default(self):
+        if not self.remote_pending_option_meta:
+            return
+        self._run_remote_flow_step(result_value=self._option_default_value(self.remote_pending_option_meta))
+
+    def _cancel_remote_flow(self):
+        self.remote_flow_context = None
+        self.remote_pending_option_meta = None
+        self._append_remote_log_line("Fluxo cancelado pelo usuário.")
+        self._refresh_remote_question_ui()
+        self._set_status("Fluxo cancelado.", "A configuração guiada foi interrompida.")
+
+    def _delete_selected_remote(self):
+        name = self._selected_remote_name()
+        if not name:
+            self._show_message("warning", "Seleção obrigatória", "Escolha um remote para excluir.")
+            return
+        answer = QMessageBox.question(
+            self,
+            "Excluir remote",
+            f"Deseja realmente excluir o remote {name} do arquivo atual?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        try:
+            cmd = [*self._rclone_base_cmd(), "config", "delete", name]
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+                **hidden_subprocess_kwargs(),
+            )
+            if result.returncode != 0:
+                raise RuntimeError((result.stderr or result.stdout or "").strip() or "Falha ao excluir remote.")
+            self.load_remotes(show_errors=False)
+            self._start_remote_create_mode()
+            self._show_message("info", "Remote excluído", f"O remote {name} foi removido.")
+        except Exception as exc:
+            self._show_message("error", "Falha ao excluir", str(exc))
+
+    def _reconnect_selected_remote(self):
+        name = self._selected_remote_name()
+        if not name:
+            self._show_message("warning", "Seleção obrigatória", "Escolha um remote para reconectar.")
+            return
+        try:
+            subprocess.Popen(
+                [*self._rclone_base_cmd(), "config", "reconnect", f"{name}:"],
+                creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+            )
+            self._set_status("Reconexão iniciada.", f"O fluxo de reautenticação do remote {name} foi aberto.")
+        except Exception as exc:
+            self._show_message("error", "Falha ao reconectar", str(exc))
 
     def _make_button(self, text, callback=None, variant="secondary"):
         button = QPushButton(text)
@@ -1814,6 +2968,7 @@ class RcloneManagerWindow(QMainWindow):
 
         if not os.path.isfile(path):
             self.remotes = []
+            self.remote_configs = {}
             self.remote_count_label.setText("0 remotes carregados")
             self._update_remote_combos()
             if show_errors:
@@ -1822,7 +2977,13 @@ class RcloneManagerWindow(QMainWindow):
 
         parser = configparser.RawConfigParser()
         parser.read(path, encoding="utf-8")
-        self.remotes = parser.sections()
+        self.remote_configs = {}
+        for section in parser.sections():
+            try:
+                self.remote_configs[section] = {key: value for key, value in parser.items(section)}
+            except Exception:
+                self.remote_configs[section] = {}
+        self.remotes = list(self.remote_configs.keys())
         self.remote_count_label.setText(f"{len(self.remotes)} remotes carregados")
         self._update_remote_combos()
         self._set_status(
@@ -1831,22 +2992,290 @@ class RcloneManagerWindow(QMainWindow):
         )
 
     def _update_remote_combos(self):
-        combos = [
-            self.lr_browser["combo"],
-            self.rl_browser["combo"],
-            self.rr_src_browser["combo"],
-            self.rr_dst_browser["combo"],
+        browsers = [
+            self.lr_browser,
+            self.rl_browser,
+            self.rr_src_browser,
+            self.rr_dst_browser,
         ]
-        for combo in combos:
+        remote_icon = build_remote_icon()
+        count_text = f"{len(self.remotes)} remote" if len(self.remotes) == 1 else f"{len(self.remotes)} remotes"
+
+        for browser in browsers:
+            combo = browser["combo"]
             current = combo.currentText()
             combo.blockSignals(True)
             combo.clear()
-            combo.addItems(self.remotes)
+            for remote_name in self.remotes:
+                combo.addItem(remote_icon, remote_name)
             if current and current in self.remotes:
                 combo.setCurrentText(current)
             elif self.remotes:
                 combo.setCurrentIndex(0)
+            else:
+                combo.setCurrentIndex(-1)
             combo.blockSignals(False)
+            if "count_label" in browser:
+                browser["count_label"].setText(count_text if self.remotes else "sem remotes")
+
+    def _handle_remote_provider_changed(self):
+        provider = self._current_provider_meta()
+        description = str(provider.get("Description") or "").strip()
+        if hasattr(self, "remote_provider_description"):
+            self.remote_provider_description.setText(
+                description or "Escolha um serviço para o app mostrar apenas os campos necessários."
+            )
+        if hasattr(self, "remote_show_advanced"):
+            self.remote_show_advanced.setEnabled(bool(provider))
+        self._rebuild_remote_form()
+        self._refresh_remote_editor_actions()
+
+    def _rebuild_remote_form(self, current_values=None):
+        if not hasattr(self, "remote_form_layout"):
+            return
+        self._clear_layout(self.remote_form_layout)
+        self.remote_form_widgets = {}
+
+        provider = self._current_provider_meta()
+        if not provider:
+            placeholder = QLabel("Escolha um serviço acima para o formulário ser montado automaticamente.")
+            placeholder.setObjectName("mutedLabel")
+            placeholder.setWordWrap(True)
+            self.remote_form_layout.addWidget(placeholder, 0, 0, 1, 3)
+            return
+
+        values = current_values or {}
+        options = self._provider_visible_options(provider, self.remote_show_advanced.isChecked())
+        if not options:
+            placeholder = QLabel("Esse serviço pode seguir sem campos extras nesta etapa.")
+            placeholder.setObjectName("mutedLabel")
+            placeholder.setWordWrap(True)
+            self.remote_form_layout.addWidget(placeholder, 0, 0, 1, 3)
+            return
+
+        for row, option in enumerate(options):
+            option_name = str(option.get("Name") or "").strip()
+            label = QLabel(self._humanize_option_name(option_name))
+            label.setObjectName("mutedLabel")
+            self.remote_form_layout.addWidget(label, row, 0)
+            self.remote_form_layout.addWidget(InfoButton(str(option.get("Help") or ""), self.remote_form_host), row, 1)
+
+            value = values.get(option_name, "")
+            if option.get("Sensitive") or option.get("IsPassword"):
+                value = ""
+            meta = self._create_option_widget(option, value=value)
+            self.remote_form_layout.addWidget(meta["widget"], row, 2)
+            self.remote_form_layout.setColumnStretch(2, 1)
+            self.remote_form_widgets[option_name] = {"option": option, **meta}
+
+    def _update_remote_editor_mode(self):
+        mode_text = (
+            "Agora você está criando um novo remote."
+            if self.remote_editor_mode == "create"
+            else "Agora você está editando o remote selecionado."
+        )
+        if hasattr(self, "remote_mode_label"):
+            self.remote_mode_label.setText(mode_text)
+        if hasattr(self, "remote_apply_button"):
+            self.remote_apply_button.setText("Criar remote" if self.remote_editor_mode == "create" else "Salvar alterações")
+        if hasattr(self, "remote_name_edit"):
+            self.remote_name_edit.setEnabled(self.remote_editor_mode == "create")
+        if hasattr(self, "remote_provider_combo"):
+            self.remote_provider_combo.setEnabled(self.remote_editor_mode == "create")
+        if hasattr(self, "remote_reset_button"):
+            self.remote_reset_button.setText(
+                "Limpar formulário" if self.remote_editor_mode == "create" else "Voltar para novo remote"
+            )
+        if hasattr(self, "remote_step_hint"):
+            if self.remote_editor_mode == "create":
+                self.remote_step_hint.setText(
+                    "1. Dê um nome fácil de reconhecer.\n2. Escolha o serviço.\n3. Preencha os campos mostrados e clique em Criar remote."
+                )
+            else:
+                self.remote_step_hint.setText(
+                    "1. Revise os dados carregados do remote.\n2. Ajuste apenas o que deseja mudar.\n3. Clique em Salvar alterações."
+                )
+        self._refresh_remote_editor_actions()
+
+    def _start_remote_create_mode(self):
+        self.remote_editor_mode = "create"
+        self.remote_flow_context = None
+        self.remote_pending_option_meta = None
+        if hasattr(self, "remote_name_edit"):
+            self.remote_name_edit.clear()
+        if hasattr(self, "remote_provider_combo"):
+            self.remote_provider_combo.setCurrentIndex(0)
+        if hasattr(self, "remote_show_advanced"):
+            self.remote_show_advanced.setChecked(False)
+        self._set_remote_log_visible(False)
+        self._update_remote_editor_mode()
+        self._handle_remote_provider_changed()
+        self._refresh_remote_question_ui()
+
+    def _load_selected_remote_into_editor(self):
+        name = self._selected_remote_name()
+        if not name:
+            self._show_message("warning", "Seleção obrigatória", "Escolha um remote na lista para editar.")
+            return
+
+        remote_data = self.remote_configs.get(name, {})
+        provider = str(remote_data.get("type") or "").strip()
+        if not provider:
+            self._show_message("warning", "Tipo não identificado", "Não foi possível descobrir o tipo do remote selecionado.")
+            return
+
+        self.remote_editor_mode = "update"
+        self.remote_flow_context = None
+        self.remote_pending_option_meta = None
+        self.remote_name_edit.setText(name)
+        index = self.remote_provider_combo.findData(provider)
+        if index >= 0:
+            self.remote_provider_combo.setCurrentIndex(index)
+        self.remote_show_advanced.setChecked(False)
+        self._update_remote_editor_mode()
+        self._rebuild_remote_form(current_values=remote_data)
+        self._refresh_remote_question_ui()
+        self._set_status("Remote carregado.", f"Revise os dados de {name} e salve apenas se quiser alterar algo.")
+
+    def _refresh_selected_remote_details(self):
+        name = self._selected_remote_name()
+        if not name:
+            if hasattr(self, "remote_summary_name_value"):
+                self.remote_summary_name_value.setText("Nenhum remote selecionado")
+            if hasattr(self, "remote_summary_type_value"):
+                self.remote_summary_type_value.setText("—")
+            if hasattr(self, "remote_summary_hint"):
+                self.remote_summary_hint.setText("Selecione um remote na lista para habilitar as ações.")
+            if hasattr(self, "remote_redacted_view"):
+                self.remote_redacted_view.clear()
+            self._set_remote_details_visible(False)
+            return
+
+        remote_data = self.remote_configs.get(name, {})
+        remote_type = str(remote_data.get("type") or "não identificado").strip() or "não identificado"
+        if hasattr(self, "remote_summary_name_value"):
+            self.remote_summary_name_value.setText(name)
+        if hasattr(self, "remote_summary_type_value"):
+            self.remote_summary_type_value.setText(remote_type)
+        if hasattr(self, "remote_summary_hint"):
+            if self.remote_editor_mode == "update" and self.remote_name_edit.text().strip() == name:
+                self.remote_summary_hint.setText("Esse remote já está carregado no assistente para edição.")
+            else:
+                self.remote_summary_hint.setText("Clique em Editar selecionado para carregar esse remote no assistente.")
+
+        try:
+            cmd = [*self._rclone_base_cmd(), "config", "redacted", name]
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+                **hidden_subprocess_kwargs(),
+            )
+            if result.returncode != 0:
+                raise RuntimeError((result.stderr or result.stdout or "").strip() or "Falha ao carregar detalhes.")
+            self.remote_redacted_view.setPlainText((result.stdout or "").strip())
+        except Exception as exc:
+            self.remote_redacted_view.setPlainText(f"Não foi possível carregar os detalhes:\n{exc}")
+            if hasattr(self, "remote_summary_hint"):
+                self.remote_summary_hint.setText("O resumo foi carregado, mas a configuração segura não pôde ser lida.")
+
+    def _run_remote_flow_step(self, result_value=None):
+        context = self.remote_flow_context
+        if not context:
+            return
+        try:
+            command = [*self._rclone_base_cmd(), "config", context["action"], context["name"]]
+            if context["action"] == "create":
+                command.append(context["provider"])
+            command.extend(context["seed_pairs"])
+            command.extend(["--non-interactive", "--all"])
+            if context.get("state") is not None:
+                command.extend(["--continue", "--state", context["state"], "--result", result_value or ""])
+
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+                **hidden_subprocess_kwargs(),
+            )
+            stdout = (result.stdout or "").strip()
+            stderr = (result.stderr or "").strip()
+            if stdout:
+                self._append_remote_log_line(stdout)
+            if stderr:
+                self._append_remote_log_line(stderr)
+
+            payload = None
+            if stdout.startswith("{"):
+                try:
+                    payload = json.loads(stdout)
+                except Exception:
+                    payload = None
+
+            if result.returncode != 0 and payload is None:
+                raise RuntimeError(stderr or stdout or f"Falha no fluxo ({result.returncode}).")
+
+            if payload is not None:
+                context["state"] = payload.get("State")
+                self.remote_pending_option_meta = payload.get("Option")
+                self._refresh_remote_question_ui(error_text=payload.get("Error") or "")
+                if payload.get("State"):
+                    option_name = self._humanize_option_name((payload.get("Option") or {}).get("Name", "próxima etapa"))
+                    self._set_status("Configuração em andamento.", f"Continue o assistente em: {option_name}.")
+                    return
+
+            self.remote_flow_context = None
+            self.remote_pending_option_meta = None
+            self._refresh_remote_question_ui()
+            self.load_remotes(show_errors=False)
+            self._select_remote_in_manager(context["name"])
+            self._refresh_selected_remote_details()
+            self._set_status("Remote atualizado.", f"O remote {context['name']} foi salvo no arquivo atual.")
+            self._show_message("info", "Remote salvo", f"O remote {context['name']} foi processado com sucesso.")
+        except Exception as exc:
+            self._set_remote_log_visible(True)
+            self._set_status("Erro no configurador.", str(exc))
+            self._show_message("error", "Falha no configurador", str(exc))
+
+    def _refresh_remote_question_ui(self, error_text=""):
+        if not hasattr(self, "remote_question_layout"):
+            return
+        self._clear_layout(self.remote_question_layout)
+
+        pending = self.remote_pending_option_meta or {}
+        has_pending = bool(self.remote_flow_context and self.remote_flow_context.get("state"))
+        self.remote_question_card.setVisible(has_pending)
+        self.remote_question_default_button.setEnabled(has_pending)
+        self.remote_question_continue_button.setEnabled(has_pending)
+        self.remote_question_cancel_button.setEnabled(has_pending)
+
+        if not has_pending:
+            self.remote_question_input_meta = None
+            self.remote_question_hint.setText("Nenhuma etapa pendente no momento.")
+            self.remote_question_error.setText("")
+            return
+
+        option_name = str(pending.get("Name") or "Etapa adicional")
+        help_text = str(pending.get("Help") or "").strip()
+        self.remote_question_hint.setText(
+            help_text or f"O serviço pediu uma confirmação extra para continuar: {self._humanize_option_name(option_name)}."
+        )
+        self.remote_question_error.setText(error_text)
+
+        label = QLabel(self._humanize_option_name(option_name))
+        label.setObjectName("mutedLabel")
+        self.remote_question_layout.addWidget(label, 0, 0)
+        self.remote_question_layout.addWidget(InfoButton(help_text, self.remote_question_host), 0, 1)
+        meta = self._create_option_widget(pending, value=self._option_default_value(pending))
+        self.remote_question_layout.addWidget(meta["widget"], 0, 2)
+        self.remote_question_layout.setColumnStretch(2, 1)
+        self.remote_question_input_meta = {"option": pending, **meta}
 
 
 def main():
